@@ -343,7 +343,7 @@ mod bnode {
         ///
         /// A vector of new nodes.
         pub fn split(self) -> Vec<Self> {
-            if self.data.len() <= PAGE_SIZE {
+            if self.size() <= PAGE_SIZE {
                 return vec![self];
             }
 
@@ -452,7 +452,7 @@ mod bnode {
             let old_kv_size = element_size(self, index);
 
             let mut node = Self {
-                data: vec![0; new_kv_size + self.data.len() - old_kv_size],
+                data: vec![0; new_kv_size + self.size() - old_kv_size],
             };
 
             node.set_header(NodeType::Internal, self.num_values() + inc - 1);
@@ -486,9 +486,9 @@ mod bnode {
             // which has been checked to exist above.
             assert!(self.data.len() >= self.kv_position(0));
 
-            // Check that size is correct. This needs to access the last element of the offset
+            // Check that size is exists. This needs to access the last element of the offset
             // list, which has been checked to exist above.
-            assert_eq!(self.data.len(), self.size());
+            assert!(self.data.len() >= self.size());
 
             // Offsets need to be strictly increasing since key-values can't have non-positive
             // size (even an empty node as size 4 (key-length + value-length)).
@@ -517,7 +517,7 @@ mod bnode {
             let old_kv_size = key.len() + self.value(index).len() + KV_HEADER_SIZE;
 
             let mut node = Self {
-                data: vec![0; kv_size + self.data.len() - old_kv_size],
+                data: vec![0; kv_size + self.size() - old_kv_size],
             };
 
             node.set_header(self.node_type(), self.num_values());
@@ -543,7 +543,7 @@ mod bnode {
 
             // New size = 2 (u16, offset) + kv_size + previous_size
             let mut node = Self {
-                data: vec![0; 2 + kv_size + self.data.len()],
+                data: vec![0; 2 + kv_size + self.size()],
             };
 
             node.set_header(self.node_type(), self.num_values() + 1);

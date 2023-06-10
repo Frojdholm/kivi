@@ -136,10 +136,7 @@ impl PageAllocate for VecStorage {
 
 impl PageRead for VecStorage {
     fn read(&self, ptr: u64) -> Option<Vec<u8>> {
-        self.data.get(ptr as usize).map(|page| {
-            let size = page.used as usize;
-            page.bytes[..size].into()
-        })
+        self.data.get(ptr as usize).map(|page| page.bytes.clone())
     }
 }
 
@@ -151,7 +148,6 @@ impl PageWrite for VecStorage {
             }
 
             page.bytes[..data.len()].copy_from_slice(data);
-            page.used = data.len() as u16;
 
             Ok(())
         } else {
@@ -162,15 +158,13 @@ impl PageWrite for VecStorage {
 
 #[derive(Debug, Clone)]
 struct Page {
-    used: u16,
-    bytes: [u8; PAGE_SIZE],
+    bytes: Vec<u8>,
 }
 
 impl Page {
     fn empty() -> Self {
         Self {
-            used: 0,
-            bytes: [0; PAGE_SIZE],
+            bytes: vec![0; PAGE_SIZE],
         }
     }
 
@@ -179,12 +173,9 @@ impl Page {
             return Err(WriteError::DataTooLarge);
         }
 
-        let mut bytes = [0; PAGE_SIZE];
+        let mut bytes = vec![0; PAGE_SIZE];
         bytes[..data.len()].copy_from_slice(data);
-        Ok(Self {
-            used: data.len() as u16,
-            bytes,
-        })
+        Ok(Self { bytes })
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), WriteError> {
@@ -192,7 +183,6 @@ impl Page {
             return Err(WriteError::DataTooLarge);
         }
 
-        self.used = data.len() as u16;
         self.bytes[..data.len()].copy_from_slice(data);
         Ok(())
     }
@@ -244,6 +234,6 @@ mod tests {
     fn test_allocated_pointer_can_be_read() {
         let mut storage = VecStorage::new();
         let ptr = storage.allocate(b"Hello world").unwrap();
-        assert_eq!(storage.read(ptr), Some(b"Hello world".to_vec()));
+        assert!(storage.read(ptr).unwrap().starts_with(b"Hello world"));
     }
 }
