@@ -11,7 +11,9 @@ pub struct AlreadyAllocated {}
 /// Operations are more efficient if pointers are accessed in order. In
 /// particular allocating a higher pointer might require all lower pointers
 /// to be allocated.
-pub trait PageStorage {
+pub trait PageStorage: PageAllocate + PageRead + PageWrite {}
+
+pub trait PageAllocate {
     /// Allocate a pointer.
     ///
     /// Note that allocating a pointer might require all lower pointers to be
@@ -46,7 +48,9 @@ pub trait PageStorage {
     ///
     /// - ptr: The pointer to deallocate.
     fn deallocate(&mut self, ptr: u64);
+}
 
+pub trait PageRead {
     /// Read a pointer from the storage.
     ///
     /// # Parameters
@@ -58,8 +62,10 @@ pub trait PageStorage {
     /// If the pointer is allocated the data is copied from the storage and
     /// returned as `Some(data)`, otherwise `None` is returned.
     fn read(&self, ptr: u64) -> Option<Vec<u8>>;
+}
 
-    /// Write to a pointer from in the storage.
+pub trait PageWrite {
+    /// Write to a pointer in the storage.
     ///
     /// # Parameters
     ///
@@ -83,7 +89,9 @@ impl VecStorage {
     }
 }
 
-impl PageStorage for VecStorage {
+impl PageStorage for VecStorage {}
+
+impl PageAllocate for VecStorage {
     fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocated> {
         let index = ptr as usize;
         if self.data.len() > index {
@@ -106,14 +114,18 @@ impl PageStorage for VecStorage {
     fn deallocate(&mut self, _: u64) {
         // NOOP
     }
+}
 
+impl PageRead for VecStorage {
     fn read(&self, ptr: u64) -> Option<Vec<u8>> {
         self.data.get(ptr as usize).map(|page| {
             let size = page.used as usize;
             page.bytes[..size].into()
         })
     }
+}
 
+impl PageWrite for VecStorage {
     fn write(&mut self, ptr: u64, data: &[u8]) -> Result<(), WriteError> {
         if let Some(page) = self.data.get_mut(ptr as usize) {
             if page.bytes.len() < data.len() {
