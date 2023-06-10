@@ -1,4 +1,4 @@
-use crate::storage::SequentialStorage;
+use crate::storage::PageStorage;
 
 use bnode::Node;
 
@@ -19,12 +19,12 @@ pub enum BTreeError {
 
 /// A B+-Tree backed by some storage.
 #[derive(Debug)]
-pub struct BTree<T: SequentialStorage> {
+pub struct BTree<T: PageStorage> {
     root: Ptr,
     storage: T,
 }
 
-impl<T: SequentialStorage> BTree<T> {
+impl<T: PageStorage> BTree<T> {
     /// Create a new BTree.
     ///
     /// # Parameters
@@ -141,7 +141,7 @@ impl<T: SequentialStorage> BTree<T> {
 }
 
 mod bnode {
-    use crate::storage::SequentialStorage;
+    use crate::storage::PageStorage;
     use crate::PAGE_SIZE;
 
     use super::Ptr;
@@ -274,7 +274,7 @@ mod bnode {
             node
         }
 
-        pub fn find_key<T: SequentialStorage>(&self, key: &[u8], storage: &T) -> Option<Vec<u8>> {
+        pub fn find_key<T: PageStorage>(&self, key: &[u8], storage: &T) -> Option<Vec<u8>> {
             let index = self.find_index(key);
             match self.node_type() {
                 NodeType::Internal => {
@@ -309,12 +309,7 @@ mod bnode {
         /// # Returns
         ///
         /// The newly created node.
-        pub fn insert<T: SequentialStorage>(
-            &self,
-            key: &[u8],
-            value: &[u8],
-            storage: &mut T,
-        ) -> Self {
+        pub fn insert<T: PageStorage>(&self, key: &[u8], value: &[u8], storage: &mut T) -> Self {
             let index = self.find_index(key);
 
             match self.node_type() {
@@ -442,7 +437,7 @@ mod bnode {
         /// # Returns
         ///
         /// The new internal node.
-        pub fn insert_internal<T: SequentialStorage>(
+        pub fn insert_internal<T: PageStorage>(
             &self,
             index: usize,
             nodes: Vec<Self>,

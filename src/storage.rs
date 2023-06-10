@@ -6,12 +6,12 @@ pub struct WriteError {}
 #[derive(Debug)]
 pub struct AlreadyAllocated {}
 
-/// Represents a storage where access is sequential.
+/// Represents a storage where allocation size is limited to pages.
 ///
 /// Operations are more efficient if pointers are accessed in order. In
 /// particular allocating a higher pointer might require all lower pointers
 /// to be allocated.
-pub trait SequentialStorage {
+pub trait PageStorage {
     /// Allocate a pointer.
     ///
     /// Note that allocating a pointer might require all lower pointers to be
@@ -83,7 +83,7 @@ impl VecStorage {
     }
 }
 
-impl SequentialStorage for VecStorage {
+impl PageStorage for VecStorage {
     fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocated> {
         let index = ptr as usize;
         if self.data.len() > index {
