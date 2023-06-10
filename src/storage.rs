@@ -1,7 +1,11 @@
 use crate::PAGE_SIZE;
 
 #[derive(Debug)]
-pub struct WriteError {}
+pub enum WriteError {
+    WriteFailed,
+    DataTooLarge,
+    PageNotFound,
+}
 
 #[derive(Debug)]
 pub struct AlreadyAllocated {}
@@ -129,7 +133,7 @@ impl PageWrite for VecStorage {
     fn write(&mut self, ptr: u64, data: &[u8]) -> Result<(), WriteError> {
         if let Some(page) = self.data.get_mut(ptr as usize) {
             if page.bytes.len() < data.len() {
-                return Err(WriteError {});
+                return Err(WriteError::DataTooLarge);
             }
 
             page.bytes[..data.len()].copy_from_slice(data);
@@ -137,7 +141,7 @@ impl PageWrite for VecStorage {
 
             Ok(())
         } else {
-            Err(WriteError {})
+            Err(WriteError::PageNotFound)
         }
     }
 }
@@ -158,7 +162,7 @@ impl Page {
 
     fn new(data: &[u8]) -> Result<Self, WriteError> {
         if data.len() > PAGE_SIZE {
-            return Err(WriteError {});
+            return Err(WriteError::DataTooLarge);
         }
 
         let mut bytes = [0; PAGE_SIZE];
