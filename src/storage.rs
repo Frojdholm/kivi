@@ -72,7 +72,7 @@ pub trait SequentialStorage {
     fn write(&mut self, ptr: u64, data: &[u8]) -> Result<(), WriteError>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct VecStorage {
     data: Vec<Page>,
 }
@@ -130,7 +130,7 @@ impl SequentialStorage for VecStorage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Page {
     used: u16,
     bytes: [u8; PAGE_SIZE],

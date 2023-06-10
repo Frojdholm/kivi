@@ -33,10 +33,26 @@ impl<T: SequentialStorage> BTree<T> {
     pub fn new(storage: T) -> Self {
         let mut storage = storage;
 
-        // TODO: Try to read the master page, allocate if missing
+        let root = if let Some(data) = storage.read(0) {
+            assert!(data.len() >= 8, "master page does not contain a pointer");
+            let ptr = u64::from_le_bytes(data[0..8].try_into().unwrap());
+            assert!(storage.read(ptr).is_some(), "root pointer does not exist");
+            ptr
+        } else {
+            storage
+                .allocate_ptr(0)
+                .expect("master page already allocated");
 
-        let root = Node::empty_leaf();
-        let root = storage.allocate(&root.data).expect("allocation error");
+            let node = Node::empty_leaf();
+            let ptr = storage.allocate(&node.data).expect("allocation error");
+
+            storage
+                .write(0, &ptr.to_le_bytes())
+                .expect("allocation error");
+
+            ptr
+        };
+
         Self { root, storage }
     }
 
@@ -89,6 +105,10 @@ impl<T: SequentialStorage> BTree<T> {
             self.root = root;
         }
 
+        self.storage
+            .write(0, &self.root.to_le_bytes())
+            .expect("allocation error");
+
         // TODO: bool should signify if a new value was created or if the value was updated.
         Ok(true)
     }
@@ -104,7 +124,7 @@ impl<T: SequentialStorage> BTree<T> {
     /// If the key is found `Some(value)` is returned, otherwise `None` is
     /// returned. Note that a key exceeding the max size or an empty key always
     /// will return `None`.
-    pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         if key.is_empty() {
             return None;
         }
@@ -833,6 +853,14 @@ mod tests {
         for i in 0_u64..200_u64 {
             let key = i.to_le_bytes();
             assert_eq!(tree.get(&key).unwrap(), &value);
+        }
+
+        // Check that the storage can be loaded correctly into a new BTree
+        let tree_clone = BTree::new(tree.storage.clone());
+        assert!(tree_clone.get(b"non-existent").is_none());
+        for i in 0_u64..200_u64 {
+            let key = i.to_le_bytes();
+            assert_eq!(tree_clone.get(&key).unwrap(), &value);
         }
     }
 }
