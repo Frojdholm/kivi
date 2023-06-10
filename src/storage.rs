@@ -85,11 +85,15 @@ pub trait PageWrite {
 #[derive(Debug, Default, Clone)]
 pub struct VecStorage {
     data: Vec<Page>,
+    freelist: Vec<u64>,
 }
 
 impl VecStorage {
     pub fn new() -> Self {
-        Self { data: Vec::new() }
+        Self {
+            data: Vec::new(),
+            freelist: Vec::new(),
+        }
     }
 }
 
@@ -97,6 +101,11 @@ impl PageStorage for VecStorage {}
 
 impl PageAllocate for VecStorage {
     fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocated> {
+        if let Some(pos) = self.freelist.iter().position(|x| *x == ptr) {
+            self.freelist.remove(pos);
+            return Ok(());
+        }
+
         let index = ptr as usize;
         if self.data.len() > index {
             return Err(AlreadyAllocated {});
@@ -110,13 +119,18 @@ impl PageAllocate for VecStorage {
     }
 
     fn allocate(&mut self, data: &[u8]) -> Result<u64, WriteError> {
-        let index = self.data.len() as u64;
-        self.data.push(Page::new(data)?);
-        Ok(index)
+        if let Some(ptr) = self.freelist.pop() {
+            self.data[ptr as usize].write(data)?;
+            Ok(ptr)
+        } else {
+            let index = self.data.len() as u64;
+            self.data.push(Page::new(data)?);
+            Ok(index)
+        }
     }
 
-    fn deallocate(&mut self, _: u64) {
-        // NOOP
+    fn deallocate(&mut self, ptr: u64) {
+        self.freelist.push(ptr);
     }
 }
 
@@ -171,6 +185,16 @@ impl Page {
             used: data.len() as u16,
             bytes,
         })
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<(), WriteError> {
+        if data.len() > PAGE_SIZE {
+            return Err(WriteError::DataTooLarge);
+        }
+
+        self.used = data.len() as u16;
+        self.bytes[..data.len()].copy_from_slice(data);
+        Ok(())
     }
 }
 
