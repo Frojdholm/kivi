@@ -1,12 +1,17 @@
 use crate::PAGE_SIZE;
 
+/// Error type used for operations that store data in [`PageStorage`].
 #[derive(Debug)]
 pub enum WriteError {
+    /// Data could not be written to the storage.
     WriteFailed,
+    /// The data is larger than [`PAGE_SIZE`].
     DataTooLarge,
-    PageNotFound,
+    /// The pointer does not refer to an allocated page.
+    PageNotAllocated,
 }
 
+/// Error returned when the page being allocated is already allocated.
 #[derive(Debug)]
 pub struct AlreadyAllocated {}
 
@@ -36,11 +41,6 @@ pub trait PageAllocate {
     /// # Parameters
     ///
     /// - data: The data to store. The data will be copied into the storage.
-    ///
-    /// # Returns
-    ///
-    /// On succeful allocation `Ok(pointer)` is returned. If the data could not
-    /// be written `Err(WriteError {})` is returned.
     fn allocate(&mut self, data: &[u8]) -> Result<u64, WriteError>;
 
     /// Deallocate a pointer.
@@ -151,7 +151,7 @@ impl PageWrite for VecStorage {
 
             Ok(())
         } else {
-            Err(WriteError::PageNotFound)
+            Err(WriteError::PageNotAllocated)
         }
     }
 }
