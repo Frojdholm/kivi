@@ -1,4 +1,4 @@
-use crate::storage::PageStorage;
+use crate::storage::{PageBuffer, PageNotAllocatedError, PageStorage, VecStorage};
 
 use bnode::Node;
 
@@ -48,42 +48,18 @@ impl<'a> Value<'a> {
 }
 
 /// A B+-Tree backed by some storage.
-#[derive(Debug)]
-pub struct BTree<T: PageStorage> {
-    root: Ptr,
-    storage: T,
+pub struct BTree {
+    storage: BtreeStorage,
 }
 
-impl<T: PageStorage> BTree<T> {
+impl BTree {
     /// Create a new BTree.
     ///
     /// # Parameters
     ///
     /// - storage: The storage where tree nodes should be stored.
-    pub fn new(storage: T) -> Self {
-        let mut storage = storage;
-
-        let root = if let Some(data) = storage.read(0) {
-            assert!(data.len() >= 8, "master page does not contain a pointer");
-            let ptr = u64::from_le_bytes(data[0..8].try_into().unwrap());
-            assert!(storage.read(ptr).is_some(), "root pointer does not exist");
-            ptr
-        } else {
-            storage
-                .allocate_ptr(0)
-                .expect("master page already allocated");
-
-            let node = Node::empty_leaf();
-            let ptr = storage.allocate(&node.data).expect("allocation error");
-
-            storage
-                .write(0, &ptr.to_le_bytes())
-                .expect("allocation error");
-
-            ptr
-        };
-
-        Self { root, storage }
+    pub fn new(storage: BtreeStorage) -> Self {
+        Self { storage }
     }
 
     /// Insert or update a key-value in the tree.
@@ -97,36 +73,34 @@ impl<T: PageStorage> BTree<T> {
     ///
     /// An `Ok` result signifies that insertion succeeded.
     pub fn insert(&mut self, key: Key, value: Value) -> bool {
-        // TODO: Deal with allocation failures.
+        let old_root_ptr = self.storage.read_root();
         let root = Node::from_bytes(
             self.storage
-                .read(self.root)
+                .read(old_root_ptr)
                 .expect("invalid tree root pointer"),
         );
         let root = root.insert(key.buf, value.buf, &mut self.storage);
 
         let nodes = root.split();
-        if nodes.len() == 1 {
-            let root = self
-                .storage
-                .allocate(&nodes[0].data)
-                .expect("root node too large");
-            self.storage.deallocate(self.root);
-            self.root = root;
-        } else {
-            let root = Node::new_internal(self.root);
-            let root = root.insert_internal(0, nodes, &mut self.storage);
-            let root = self
-                .storage
-                .allocate(&root.data)
-                .expect("root node too large");
-            self.storage.deallocate(self.root);
-            self.root = root;
-        }
 
-        self.storage
-            .write(0, &self.root.to_le_bytes())
-            .expect("allocation error");
+        self.storage.defer_deallocate(old_root_ptr);
+
+        let root_ptr = if nodes.len() == 1 {
+            self.storage.allocate(
+                nodes[0]
+                    .as_buffer()
+                    .expect("node has just been split so cannot be larger than a page"),
+            )
+        } else {
+            let root = Node::new_internal(nodes, &mut self.storage);
+            self.storage.allocate(
+                root.as_buffer()
+                    .expect("new internal nodes should always fit a split node"),
+            )
+        };
+
+        self.storage.write_root(root_ptr);
+        // self.storage.update_freelist();
 
         // TODO: bool should signify if a new value was created or if the value was updated.
         true
@@ -145,18 +119,85 @@ impl<T: PageStorage> BTree<T> {
     pub fn get(&self, key: Key) -> Option<Vec<u8>> {
         let root = Node::from_bytes(
             self.storage
-                .read(self.root)
+                .read(self.storage.read_root())
                 .expect("invalid tree root node"),
         );
         root.find_key(key.buf, &self.storage)
     }
 }
 
+/// The underlying persistent storage for the BTree.
+///
+/// The storage handles storing metadata for the tree and also manages
+/// the freelist to make memory usage more efficient.
+pub struct BtreeStorage {
+    inner: Box<dyn PageStorage>,
+}
+
+impl BtreeStorage {
+    /// The master page pointer
+    const MASTER: u64 = 0;
+
+    pub fn in_memory() -> Self {
+        Self::new(Box::new(VecStorage::new()))
+    }
+
+    fn new(inner: Box<dyn PageStorage>) -> Self {
+        let mut storage = Self { inner };
+
+        if let Ok(()) = storage.inner.allocate_ptr(Self::MASTER) {
+            let empty = Node::empty_leaf();
+            let data = PageBuffer::new(&empty.data)
+                .expect("empty node data is always smaller than a page");
+            let root = storage.allocate(data);
+            storage.write_root(root);
+        }
+
+        // TODO: verify that the master page is correctly initialized
+        storage
+    }
+
+    fn write_root(&mut self, root: u64) {
+        let root_buf = root.to_le_bytes();
+        let data = PageBuffer::new(&root_buf).expect("pointers are always smaller than a page");
+        self.write(Self::MASTER, data)
+            .expect("the master page should always be allocated");
+    }
+
+    fn read_root(&self) -> u64 {
+        let master = self
+            .read(Self::MASTER)
+            .expect("the master page should always be allocated");
+
+        u64::from_le_bytes(
+            master[0..8]
+                .try_into()
+                .expect("the master page should always store the root pointer"),
+        )
+    }
+
+    fn defer_deallocate(&mut self, _ptr: u64) {
+        // NOOP
+    }
+
+    fn allocate(&mut self, data: PageBuffer) -> u64 {
+        self.inner.allocate(data.buf)
+    }
+
+    fn read(&self, ptr: u64) -> Option<Vec<u8>> {
+        self.inner.read(ptr)
+    }
+
+    fn write(&mut self, ptr: u64, data: PageBuffer) -> Result<(), PageNotAllocatedError> {
+        self.inner.write(ptr, data.buf)
+    }
+}
+
 mod bnode {
-    use crate::storage::PageStorage;
+    use crate::storage::{DataTooLargeError, PageBuffer};
     use crate::PAGE_SIZE;
 
-    use super::Ptr;
+    use super::{BtreeStorage, Ptr};
 
     const HEADER_SIZE: usize = 4;
     const KV_HEADER_SIZE: usize = 4;
@@ -264,34 +305,62 @@ mod bnode {
             Self { data }
         }
 
-        /// Create an new internal node with a single child node.
+        /// Create an internal node.
         ///
-        /// Note: The function assumes that the child node pointed to by `ptr`
-        /// has the sentinel value (`&[]`) as its first key.
+        /// The returned node might be too large to store and might have to be
+        /// split.
         ///
         /// # Parameters
         ///
-        /// - `ptr`: A pointer to the single child node.
-        pub fn new_internal(ptr: Ptr) -> Self {
-            let data = vec![
-                1, 0, // internal node
-                1, 0, // 1 key-value
-                0, 0, 0, 0, 0, 0, 0, 0, // pointer
-                4, 0, // offset to end of node
-                0, 0, // empty key length
-                0, 0, // empty value length
-            ];
-            let mut node = Self { data };
-            node.set_pointer(0, ptr);
+        /// - `nodes`: A list of nodes to insert.
+        /// - `storage`: The storage where nodes are stored.
+        ///
+        /// # Returns
+        ///
+        /// The new internal node.
+        pub fn new_internal(nodes: Vec<Self>, storage: &mut BtreeStorage) -> Self {
+            // size = 10 (u64 + u16, pointer + offset) + KV_size
+            let element_size = |n: &Node, i| 10 + 4 + n.key(i).len();
+
+            let new_kv_size = nodes.iter().map(|n| element_size(n, 0)).sum::<usize>();
+            let mut node = Self {
+                data: vec![0; new_kv_size + HEADER_SIZE],
+            };
+
+            node.set_header(NodeType::Internal, nodes.len());
+
+            for (i, n) in nodes.into_iter().enumerate() {
+                append_kv(&mut node, i, n.key(0), b"");
+                let ptr = storage.allocate(
+                    n.as_buffer()
+                        .expect("nodes should always have been split here"),
+                );
+                node.set_pointer(i, ptr);
+            }
+
+            node.verify_node_layout();
             node
         }
 
-        pub fn find_key<T: PageStorage>(&self, key: &[u8], storage: &T) -> Option<Vec<u8>> {
+        /// Borrow the node data and convert it to a PageBuffer.
+        ///
+        /// # Returns
+        ///
+        /// A Result containing the PageBuffer if the data fits in a page.
+        pub fn as_buffer(&self) -> Result<PageBuffer, DataTooLargeError> {
+            PageBuffer::new(&self.data[0..self.size()])
+        }
+
+        pub fn find_key(&self, key: &[u8], storage: &BtreeStorage) -> Option<Vec<u8>> {
             let index = self.find_index(key);
             match self.node_type() {
                 NodeType::Internal => {
                     let ptr = self.pointer(index);
-                    let node = Node::from_bytes(storage.read(ptr).expect("invalid node pointer"));
+                    let node = Node::from_bytes(
+                        storage
+                            .read(ptr)
+                            .expect("internal node pointers should always exist"),
+                    );
                     node.find_key(key, storage)
                 }
                 NodeType::Leaf => {
@@ -321,7 +390,7 @@ mod bnode {
         /// # Returns
         ///
         /// The newly created node.
-        pub fn insert<T: PageStorage>(&self, key: &[u8], value: &[u8], storage: &mut T) -> Self {
+        pub fn insert(&self, key: &[u8], value: &[u8], storage: &mut BtreeStorage) -> Self {
             let index = self.find_index(key);
 
             match self.node_type() {
@@ -334,12 +403,15 @@ mod bnode {
                 }
                 NodeType::Internal => {
                     let ptr = self.pointer(index);
-                    let node = Node::from_bytes(storage.read(ptr).expect("invalid node pointer"));
-
-                    storage.deallocate(ptr);
-
+                    let node = Node::from_bytes(
+                        storage
+                            .read(ptr)
+                            .expect("pointers stored in internal nodes should always be valid"),
+                    );
                     let node = node.insert(key, value, storage);
                     let nodes = node.split();
+
+                    storage.defer_deallocate(ptr);
                     self.insert_internal(index, nodes, storage)
                 }
             }
@@ -449,11 +521,11 @@ mod bnode {
         /// # Returns
         ///
         /// The new internal node.
-        pub fn insert_internal<T: PageStorage>(
+        pub fn insert_internal(
             &self,
             index: usize,
             nodes: Vec<Self>,
-            storage: &mut T,
+            storage: &mut BtreeStorage,
         ) -> Self {
             let inc = nodes.len();
 
@@ -472,7 +544,10 @@ mod bnode {
             append_range(&mut node, self, 0, 0, index);
             for (i, n) in nodes.into_iter().enumerate() {
                 append_kv(&mut node, index + i, n.key(0), b"");
-                let ptr = storage.allocate(&n.data).expect("TODO: clean up");
+                let ptr = storage.allocate(
+                    n.as_buffer()
+                        .expect("nodes should always have been split here"),
+                );
                 node.set_pointer(index + i, ptr);
             }
             append_range(
@@ -811,7 +886,6 @@ mod bnode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::VecStorage;
 
     #[test]
     fn test_insert_and_update_single_key_in_tree() {
@@ -819,7 +893,7 @@ mod tests {
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(b"value").unwrap();
         let eulav = Value::new(b"eulav").unwrap();
-        let mut tree = BTree::new(VecStorage::new());
+        let mut tree = BTree::new(BtreeStorage::in_memory());
 
         assert!(tree.get(non_existent).is_none());
         tree.insert(key, value);
@@ -838,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_insert_many_in_tree() {
-        let mut tree = BTree::new(VecStorage::new());
+        let mut tree = BTree::new(BtreeStorage::in_memory());
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(&[0_u8; 100]).unwrap();
 
@@ -863,7 +937,7 @@ mod tests {
         }
 
         // Check that the storage can be loaded correctly into a new BTree
-        let tree_clone = BTree::new(tree.storage.clone());
+        let tree_clone = BTree::new(tree.storage);
         assert!(tree_clone.get(non_existent).is_none());
         for i in 0_u64..200_u64 {
             let buf = i.to_le_bytes();
