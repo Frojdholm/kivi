@@ -2,19 +2,49 @@ use crate::storage::PageStorage;
 
 use bnode::Node;
 
-pub type Result<T> = std::result::Result<T, BTreeError>;
-
 pub const MAX_KEY_SIZE: usize = 1000;
 pub const MAX_VAL_SIZE: usize = 3000;
 
+#[derive(Debug)]
+pub struct InvalidKey {
+    pub size: usize,
+}
+
+#[derive(Debug)]
+pub struct ValueTooLarge {
+    pub size: usize,
+}
+
 type Ptr = u64;
 
-/// Represents all the possible errors when dealing with B-Trees.
-#[derive(Debug)]
-pub enum BTreeError {
-    EmptyKey,
-    KeyTooLong,
-    ValueTooLong,
+#[derive(Debug, Clone, Copy)]
+pub struct Key<'a> {
+    buf: &'a [u8],
+}
+
+impl<'a> Key<'a> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, InvalidKey> {
+        if buf.is_empty() || buf.len() > MAX_KEY_SIZE {
+            Err(InvalidKey { size: buf.len() })
+        } else {
+            Ok(Self { buf })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Value<'a> {
+    buf: &'a [u8],
+}
+
+impl<'a> Value<'a> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, ValueTooLarge> {
+        if buf.len() > MAX_VAL_SIZE {
+            Err(ValueTooLarge { size: buf.len() })
+        } else {
+            Ok(Self { buf })
+        }
+    }
 }
 
 /// A B+-Tree backed by some storage.
@@ -60,31 +90,20 @@ impl<T: PageStorage> BTree<T> {
     ///
     /// # Parameters
     ///
-    /// - key: The key to insert or update. The key must not be empty.
+    /// - key: The key to insert or update.
     /// - value: The value to insert.
     ///
     /// # Returns
     ///
     /// An `Ok` result signifies that insertion succeeded.
-    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
-        if key.is_empty() {
-            return Err(BTreeError::EmptyKey);
-        }
-        if key.len() > MAX_KEY_SIZE {
-            return Err(BTreeError::KeyTooLong);
-        }
-        if value.len() > MAX_VAL_SIZE {
-            return Err(BTreeError::ValueTooLong);
-        }
-
+    pub fn insert(&mut self, key: Key, value: Value) -> bool {
         // TODO: Deal with allocation failures.
-
         let root = Node::from_bytes(
             self.storage
                 .read(self.root)
                 .expect("invalid tree root pointer"),
         );
-        let root = root.insert(key, value, &mut self.storage);
+        let root = root.insert(key.buf, value.buf, &mut self.storage);
 
         let nodes = root.split();
         if nodes.len() == 1 {
@@ -110,7 +129,7 @@ impl<T: PageStorage> BTree<T> {
             .expect("allocation error");
 
         // TODO: bool should signify if a new value was created or if the value was updated.
-        Ok(true)
+        true
     }
 
     /// Get a value from the tree.
@@ -122,21 +141,14 @@ impl<T: PageStorage> BTree<T> {
     /// # Returns
     ///
     /// If the key is found `Some(value)` is returned, otherwise `None` is
-    /// returned. Note that a key exceeding the max size or an empty key always
-    /// will return `None`.
-    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        if key.is_empty() {
-            return None;
-        }
-        if key.len() > MAX_KEY_SIZE {
-            return None;
-        }
+    /// returned.
+    pub fn get(&self, key: Key) -> Option<Vec<u8>> {
         let root = Node::from_bytes(
             self.storage
                 .read(self.root)
                 .expect("invalid tree root node"),
         );
-        root.find_key(key, &self.storage)
+        root.find_key(key.buf, &self.storage)
     }
 }
 
@@ -803,59 +815,60 @@ mod tests {
 
     #[test]
     fn test_insert_and_update_single_key_in_tree() {
-        let key: &[u8] = b"key";
+        let key = Key::new(b"key").unwrap();
+        let non_existent = Key::new(b"non-existent").unwrap();
+        let value = Value::new(b"value").unwrap();
+        let eulav = Value::new(b"eulav").unwrap();
         let mut tree = BTree::new(VecStorage::new());
 
-        assert!(tree.get(b"non-existent").is_none());
-        tree.insert(key, b"value").unwrap();
+        assert!(tree.get(non_existent).is_none());
+        tree.insert(key, value);
         assert_eq!(tree.get(key).unwrap(), b"value");
-        assert!(tree.get(b"non-existent").is_none());
+        assert!(tree.get(non_existent).is_none());
 
-        tree.insert(key, b"eulav").unwrap();
+        tree.insert(key, eulav);
         assert_eq!(tree.get(key).unwrap(), b"eulav");
-        assert!(tree.get(b"non-existent").is_none());
+        assert!(tree.get(non_existent).is_none());
     }
 
     #[test]
-    fn test_insert_empty_key_in_tree() {
-        let mut tree = BTree::new(VecStorage::new());
-
-        assert!(tree.get(b"non-existent").is_none());
-        assert!(matches!(
-            tree.insert(b"", b"value"),
-            Err(BTreeError::EmptyKey)
-        ));
-        assert!(tree.get(b"non-existent").is_none());
+    fn test_empty_key_is_invalid() {
+        assert!(Key::new(b"").is_err());
     }
 
     #[test]
     fn test_insert_many_in_tree() {
         let mut tree = BTree::new(VecStorage::new());
-        let value = [0_u8; 100];
+        let non_existent = Key::new(b"non-existent").unwrap();
+        let value = Value::new(&[0_u8; 100]).unwrap();
 
         // Insert multiple pages of data to ensure the tree can handle splits
         for i in 0_u64..100_u64 {
-            let key = i.to_le_bytes();
-            assert!(tree.insert(&key, &value).is_ok());
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert!(tree.insert(key, value));
         }
         for i in (100_u64..200_u64).rev() {
-            let key = i.to_le_bytes();
-            assert!(tree.insert(&key, &value).is_ok());
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert!(tree.insert(key, value));
         }
 
-        assert!(tree.get(b"non-existent").is_none());
+        assert!(tree.get(non_existent).is_none());
 
         for i in 0_u64..200_u64 {
-            let key = i.to_le_bytes();
-            assert_eq!(tree.get(&key).unwrap(), &value);
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert_eq!(tree.get(key).unwrap(), value.buf);
         }
 
         // Check that the storage can be loaded correctly into a new BTree
         let tree_clone = BTree::new(tree.storage.clone());
-        assert!(tree_clone.get(b"non-existent").is_none());
+        assert!(tree_clone.get(non_existent).is_none());
         for i in 0_u64..200_u64 {
-            let key = i.to_le_bytes();
-            assert_eq!(tree_clone.get(&key).unwrap(), &value);
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert_eq!(tree_clone.get(key).unwrap(), value.buf);
         }
     }
 }
