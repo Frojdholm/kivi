@@ -741,10 +741,12 @@ mod bnode {
             self.data[start..start + 2].copy_from_slice(&offset.to_le_bytes());
         }
 
+        /// Return the number of KVs stored in this node.
         fn num_values(&self) -> usize {
             u16::from_le_bytes(self.data[2..4].try_into().unwrap()) as usize
         }
 
+        /// Return the byte offset of the offset list.
         fn offset_section_start(&self) -> usize {
             match self.node_type() {
                 NodeType::Leaf => HEADER_SIZE,
@@ -752,28 +754,28 @@ mod bnode {
             }
         }
 
+        /// Return the byte offset to the `KV_HEADER` for the KV at `index`
         fn kv_position(&self, index: usize) -> usize {
-            let list_item_size = match self.node_type() {
-                NodeType::Internal => 10,
-                NodeType::Leaf => 2,
-            };
-
-            HEADER_SIZE + self.num_values() * list_item_size + self.offset(index)
+            HEADER_SIZE + self.num_values() * self.list_item_size() + self.offset(index)
         }
 
+        /// Return the total number of bytes used for storing the KV at `index`.
         fn kv_size(&self, index: usize) -> usize {
-            let list_item_size = match self.node_type() {
-                NodeType::Internal => 10,
-                NodeType::Leaf => 2,
-            };
-
-            list_item_size + self.kv_position(index + 1) - self.kv_position(index)
+            self.list_item_size() + self.kv_position(index + 1) - self.kv_position(index)
         }
 
+        /// Return the number of bytes used for storing lists in the node per item.
+        fn list_item_size(&self) -> usize {
+            match self.node_type() {
+                NodeType::Internal => 10, // pointer + offset (u64 + u16)
+                NodeType::Leaf => 2,      // offset (u16)
+            }
+        }
+
+        /// Return the total size of the node.
         fn size(&self) -> usize {
             self.kv_position(self.num_values())
         }
-
     }
 
     fn append_range(
