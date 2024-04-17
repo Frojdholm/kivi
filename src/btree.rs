@@ -224,7 +224,7 @@ mod bnode {
     /// There are two types of nodes, leaf and internal nodes. Leaf nodes store
     /// actual key-values while internal nodes store pointers to other nodes.
     /// Note that the pointers stored in internal nodes are not normal pointers,
-    /// but pointers from [`SequentialStorage`]. Internal nodes have keys that
+    /// but pointers from [`PageStorage`]. Internal nodes have keys that
     /// correspond to the first key of the pointed to nodes. Keys in the node
     /// are always sorted.
     ///
@@ -351,6 +351,16 @@ mod bnode {
             PageBuffer::new(&self.data[0..self.size()])
         }
 
+        /// Find a value from a given key.
+        ///
+        /// # Parameters
+        ///
+        /// - `key`: The key to search for.
+        /// - `storage`: The storage where nodes are stored.
+        ///
+        /// # Returns
+        ///
+        /// The value if the key exists in the tree.
         pub fn find_key(&self, key: &[u8], storage: &BtreeStorage) -> Option<Vec<u8>> {
             let index = self.find_index(key);
             match self.node_type() {
@@ -511,6 +521,9 @@ mod bnode {
         ///
         /// The returned node might be too large to store and might have to be
         /// split.
+        ///
+        /// This function assumes that the node stored at `index` has been split
+        /// and that the nodes in `nodes` replaces it.
         ///
         /// # Parameters
         ///
@@ -760,6 +773,7 @@ mod bnode {
         fn size(&self) -> usize {
             self.kv_position(self.num_values())
         }
+
     }
 
     fn append_range(
