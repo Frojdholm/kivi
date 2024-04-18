@@ -105,6 +105,35 @@ impl BTree {
         old_val
     }
 
+    /// Delete a key-value from the tree.
+    ///
+    /// # Parameters
+    ///
+    /// - key: The key to delete.
+    ///
+    /// # Returns
+    ///
+    /// The deleted value or None if the key did not exist.
+    pub fn delete(&mut self, key: Key) -> Option<Vec<u8>> {
+        let old_root_ptr = self.storage.read_root();
+        let root = Node::from_bytes(
+            self.storage
+                .read(old_root_ptr)
+                .expect("invalid tree root pointer"),
+        );
+
+        let (root, val) = root.delete(key.buf, &mut self.storage);
+        if val.is_some() {
+            self.storage.defer_deallocate(old_root_ptr);
+            let root_ptr = self.storage.allocate(
+                root.as_buffer()
+                    .expect("deleting nodes will make the root node smaller"),
+            );
+            self.storage.write_root(root_ptr);
+        }
+        val
+    }
+
     /// Get a value from the tree.
     ///
     /// # Parameters
@@ -438,6 +467,59 @@ mod bnode {
             }
         }
 
+        /// Delete a key-value in the node.
+        ///
+        ///
+        /// Note that the nodes are immutable and this will create a new node.
+        /// If the key does not exist this is a NOP.
+        ///
+        /// # Parameters
+        ///
+        /// - key: The key to delete.
+        /// - storage: The storage where the nodes are stored.
+        ///
+        /// # Returns
+        ///
+        /// The newly created node and the value being deleted.
+        pub fn delete(self, key: &[u8], storage: &mut BtreeStorage) -> (Self, Option<Vec<u8>>) {
+            let index = self.find_index(key);
+            match self.node_type() {
+                NodeType::Leaf => {
+                    if self.key(index) == key {
+                        (self.delete_index(index), Some(self.value(index).into()))
+                    } else {
+                        // The key did not exist so just return ourselves.
+                        (self, None)
+                    }
+                }
+                NodeType::Internal => {
+                    let ptr = self.pointer(index);
+                    let node = Node::from_bytes(
+                        storage
+                            .read(ptr)
+                            .expect("pointers stored in internal nodes should always be valid"),
+                    );
+                    let (node, val) = node.delete(key, storage);
+
+                    // If val is None the key did not exist so we don't need to do anything
+                    if val.is_none() {
+                        return (self, None);
+                    }
+
+                    // IMPORTANT: Deallocating the pointer must happen after we check if val is None
+                    // since otherwise the pointer is still valid
+                    storage.defer_deallocate(ptr);
+                    if node.is_empty() {
+                        // If the node is empty we delete it from this internal node
+                        (self.delete_index(index), val)
+                    } else {
+                        // This will automatically update the key in case the first key in the node got deleted.
+                        (self.insert_internal(index, vec![node], storage), val)
+                    }
+                }
+            }
+        }
+
         /// Split a node.
         ///
         /// Depending on the size of the key-values stored in the node it can
@@ -667,6 +749,27 @@ mod bnode {
             node
         }
 
+        fn delete_index(&self, index: usize) -> Self {
+            assert!(index < self.num_values());
+
+            let mut node = Self {
+                data: vec![0; self.size()],
+            };
+
+            node.set_header(self.node_type(), self.num_values() - 1);
+            append_range(&mut node, self, 0, 0, index);
+            append_range(
+                &mut node,
+                self,
+                index,
+                index + 1,
+                self.num_values() - index - 1,
+            );
+
+            node.verify_node_layout();
+            node
+        }
+
         fn key(&self, index: usize) -> &[u8] {
             assert!(index < self.num_values());
 
@@ -755,6 +858,10 @@ mod bnode {
         /// Return the number of KVs stored in this node.
         fn num_values(&self) -> usize {
             u16::from_le_bytes(self.data[2..4].try_into().unwrap()) as usize
+        }
+
+        fn is_empty(&self) -> bool {
+            self.num_values() == 0
         }
 
         /// Return the byte offset of the offset list.
@@ -976,6 +1083,55 @@ mod tests {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
             assert_eq!(tree_clone.get(key).unwrap(), value.buf);
+        }
+    }
+
+    #[test]
+    fn test_insert_and_delete_single_key_in_tree() {
+        let key = Key::new(b"key").unwrap();
+        let non_existent = Key::new(b"non-existent").unwrap();
+        let value = Value::new(b"value").unwrap();
+        let mut tree = BTree::new(BtreeStorage::in_memory());
+
+        assert!(tree.delete(key).is_none());
+
+        assert!(tree.get(non_existent).is_none());
+        assert!(tree.insert(key, value).is_none());
+        assert_eq!(tree.get(key).unwrap(), b"value");
+        assert!(tree.get(non_existent).is_none());
+        assert!(tree.delete(non_existent).is_none());
+
+        assert_eq!(tree.delete(key), Some(value.buf.into()));
+        assert!(tree.get(key).is_none());
+        assert!(tree.get(non_existent).is_none());
+    }
+
+    #[test]
+    fn test_insert_and_delete_many_in_tree() {
+        let mut tree = BTree::new(BtreeStorage::in_memory());
+        let non_existent = Key::new(b"non-existent").unwrap();
+        let value = Value::new(&[0_u8; 100]).unwrap();
+
+        // Insert multiple pages of data to ensure the tree can handle splits
+        for i in 0_u64..100_u64 {
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert!(tree.insert(key, value).is_none());
+        }
+        for i in (100_u64..200_u64).rev() {
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert!(tree.insert(key, value).is_none());
+        }
+
+        assert!(tree.get(non_existent).is_none());
+
+        for i in 0_u64..200_u64 {
+            let buf = i.to_le_bytes();
+            let key = Key::new(&buf).unwrap();
+            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.delete(key).unwrap(), value.buf);
+            assert!(tree.get(key).is_none());
         }
     }
 }
