@@ -71,15 +71,15 @@ impl BTree {
     ///
     /// # Returns
     ///
-    /// An `Ok` result signifies that insertion succeeded.
-    pub fn insert(&mut self, key: Key, value: Value) -> bool {
+    /// The old value if the key-value was updated.
+    pub fn insert(&mut self, key: Key, value: Value) -> Option<Vec<u8>> {
         let old_root_ptr = self.storage.read_root();
         let root = Node::from_bytes(
             self.storage
                 .read(old_root_ptr)
                 .expect("invalid tree root pointer"),
         );
-        let root = root.insert(key.buf, value.buf, &mut self.storage);
+        let (root, old_val) = root.insert(key.buf, value.buf, &mut self.storage);
 
         let nodes = root.split();
 
@@ -102,8 +102,7 @@ impl BTree {
         self.storage.write_root(root_ptr);
         // self.storage.update_freelist();
 
-        // TODO: bool should signify if a new value was created or if the value was updated.
-        true
+        old_val
     }
 
     /// Get a value from the tree.
@@ -399,16 +398,28 @@ mod bnode {
         ///
         /// # Returns
         ///
-        /// The newly created node.
-        pub fn insert(&self, key: &[u8], value: &[u8], storage: &mut BtreeStorage) -> Self {
+        /// The newly created node and the old value if the value was updated.
+        pub fn insert(
+            &self,
+            key: &[u8],
+            value: &[u8],
+            storage: &mut BtreeStorage,
+        ) -> (Self, Option<Vec<u8>>) {
             let index = self.find_index(key);
 
             match self.node_type() {
                 NodeType::Leaf => {
                     if self.key(index) == key {
-                        self.update_leaf(index, key, value)
+                        // TODO: We could possibly avoid copying the old value
+                        // here since the node is being destroyed after this and
+                        // we could steal the Vec<u8> from it. However, probably
+                        // not worth worrying about.
+                        (
+                            self.update_leaf(index, key, value),
+                            Some(self.value(index).into()),
+                        )
                     } else {
-                        self.insert_leaf(index + 1, key, value)
+                        (self.insert_leaf(index + 1, key, value), None)
                     }
                 }
                 NodeType::Internal => {
@@ -418,11 +429,11 @@ mod bnode {
                             .read(ptr)
                             .expect("pointers stored in internal nodes should always be valid"),
                     );
-                    let node = node.insert(key, value, storage);
+                    let (node, old_val) = node.insert(key, value, storage);
                     let nodes = node.split();
 
                     storage.defer_deallocate(ptr);
-                    self.insert_internal(index, nodes, storage)
+                    (self.insert_internal(index, nodes, storage), old_val)
                 }
             }
         }
@@ -918,11 +929,11 @@ mod tests {
         let mut tree = BTree::new(BtreeStorage::in_memory());
 
         assert!(tree.get(non_existent).is_none());
-        tree.insert(key, value);
+        assert!(tree.insert(key, value).is_none());
         assert_eq!(tree.get(key).unwrap(), b"value");
         assert!(tree.get(non_existent).is_none());
 
-        tree.insert(key, eulav);
+        assert_eq!(tree.insert(key, eulav), Some(value.buf.into()));
         assert_eq!(tree.get(key).unwrap(), b"eulav");
         assert!(tree.get(non_existent).is_none());
     }
@@ -942,12 +953,12 @@ mod tests {
         for i in 0_u64..100_u64 {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value));
+            assert!(tree.insert(key, value).is_none());
         }
         for i in (100_u64..200_u64).rev() {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value));
+            assert!(tree.insert(key, value).is_none());
         }
 
         assert!(tree.get(non_existent).is_none());
