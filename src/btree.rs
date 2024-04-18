@@ -866,8 +866,11 @@ mod bnode {
                 5, 0, // value length
                 b'k', b'e', b'y', // key
                 b'v', b'a', b'l', b'u', b'e', // value
+                b'e', b'x', b't', b'r', b'a', // extra space shouldn't matter
             ];
             let node = Node::from_bytes(data);
+
+            node.verify_node_layout();
 
             assert_eq!(node.num_values(), 1);
             assert_eq!(node.key(0), b"key");
@@ -888,8 +891,11 @@ mod bnode {
                 3, 0, // key length
                 0, 0, // no value
                 b'k', b'e', b'y', // key
+                b'e', b'x', b't', b'r', b'a', // extra space shouldn't matter
             ];
             let node = Node::from_bytes(data);
+
+            node.verify_node_layout();
 
             assert_eq!(node.num_values(), 1);
             assert_eq!(node.pointer(0), 1);
