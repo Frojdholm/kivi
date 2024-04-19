@@ -21,14 +21,14 @@ pub const MAX_VAL_SIZE: usize = 3000;
 /// The empty key is not allowed since it's used as a sentinel value, making
 /// the key-space in the tree complete.
 #[derive(Debug)]
-pub struct InvalidKey {
+pub struct InvalidKeyError {
     /// The size of the invalid key
     pub size: usize,
 }
 
 /// Error returned when trying to create a [`Value`] larger than [`MAX_VAL_SIZE`].
 #[derive(Debug)]
-pub struct ValueTooLarge {
+pub struct ValueTooLargeError {
     /// The size of the invalid value.
     pub size: usize,
 }
@@ -48,9 +48,9 @@ impl<'a> Key<'a> {
     ///
     /// The key is invalid if it's larger than [`MAX_KEY_SIZE`] or is the empty
     /// key (`b""`). See [`InvalidKey`] for more information.
-    pub fn new(buf: &'a [u8]) -> Result<Self, InvalidKey> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, InvalidKeyError> {
         if buf.is_empty() || buf.len() > MAX_KEY_SIZE {
-            Err(InvalidKey { size: buf.len() })
+            Err(InvalidKeyError { size: buf.len() })
         } else {
             Ok(Self { buf })
         }
@@ -69,9 +69,9 @@ impl<'a> Value<'a> {
     /// # Errors
     ///
     /// The key is invalid if it's larger than [`MAX_VAL_SIZE`].
-    pub fn new(buf: &'a [u8]) -> Result<Self, ValueTooLarge> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, ValueTooLargeError> {
         if buf.len() > MAX_VAL_SIZE {
-            Err(ValueTooLarge { size: buf.len() })
+            Err(ValueTooLargeError { size: buf.len() })
         } else {
             Ok(Self { buf })
         }
