@@ -1,28 +1,53 @@
+//! A persistent B+-Tree implementation
+//!
+//! In this module a persistent B+-Tree is implemented. The tree implements
+//! insertion, update and deletion of key-values.
+
 use crate::storage::{PageBuffer, PageNotAllocatedError, PageStorage, VecStorage};
 
 use bnode::Node;
 
+/// The maximum key size allowed in the tree.
 pub const MAX_KEY_SIZE: usize = 1000;
+/// The maximum value size allowed in the tree.
 pub const MAX_VAL_SIZE: usize = 3000;
 
+/// Error returned when trying to create an invalid key.
+///
+/// Keys are invalid if they:
+/// 1. Are larger than [`MAX_KEY_SIZE`] or
+/// 2. Is the empty key `b""`.
+///
+/// The empty key is not allowed since it's used as a sentinel value, making
+/// the key-space in the tree complete.
 #[derive(Debug)]
 pub struct InvalidKey {
+    /// The size of the invalid key
     pub size: usize,
 }
 
+/// Error returned when trying to create a [`Value`] larger than [`MAX_VAL_SIZE`].
 #[derive(Debug)]
 pub struct ValueTooLarge {
+    /// The size of the invalid value.
     pub size: usize,
 }
 
 type Ptr = u64;
 
+/// Wrapper type for keys, ensures that the key is valid.
 #[derive(Debug, Clone, Copy)]
 pub struct Key<'a> {
     buf: &'a [u8],
 }
 
 impl<'a> Key<'a> {
+    /// Create a new key.
+    ///
+    /// # Errors
+    ///
+    /// The key is invalid if it's larger than [`MAX_KEY_SIZE`] or is the empty
+    /// key (`b""`). See [`InvalidKey`] for more information.
     pub fn new(buf: &'a [u8]) -> Result<Self, InvalidKey> {
         if buf.is_empty() || buf.len() > MAX_KEY_SIZE {
             Err(InvalidKey { size: buf.len() })
@@ -32,12 +57,18 @@ impl<'a> Key<'a> {
     }
 }
 
+/// Wrapper type for values, ensures that the value is valid.
 #[derive(Debug, Clone, Copy)]
 pub struct Value<'a> {
     buf: &'a [u8],
 }
 
 impl<'a> Value<'a> {
+    /// Create a new key.
+    ///
+    /// # Errors
+    ///
+    /// The key is invalid if it's larger than [`MAX_VAL_SIZE`].
     pub fn new(buf: &'a [u8]) -> Result<Self, ValueTooLarge> {
         if buf.len() > MAX_VAL_SIZE {
             Err(ValueTooLarge { size: buf.len() })
@@ -53,32 +84,24 @@ pub struct BTree {
 }
 
 impl BTree {
-    /// Create a new BTree.
-    ///
-    /// # Parameters
-    ///
-    /// - storage: The storage where tree nodes should be stored.
+    /// Create a new `BTree`.
+    #[must_use]
     pub fn new(storage: BtreeStorage) -> Self {
         Self { storage }
     }
 
     /// Insert or update a key-value in the tree.
     ///
-    /// # Parameters
+    /// # Panics
     ///
-    /// - key: The key to insert or update.
-    /// - value: The value to insert.
+    /// The function can panic in case the internal state of the tree is invalid.
     ///
     /// # Returns
     ///
     /// The old value if the key-value was updated.
     pub fn insert(&mut self, key: Key, value: Value) -> Option<Vec<u8>> {
-        let old_root_ptr = self.storage.read_root();
-        let root = Node::from_bytes(
-            self.storage
-                .read(old_root_ptr)
-                .expect("invalid tree root pointer"),
-        );
+        let old_root_ptr = self.storage.read_root_ptr();
+        let root = self.storage.read_root();
         let (root, old_val) = root.insert(key.buf, value.buf, &mut self.storage);
 
         let nodes = root.split();
@@ -107,20 +130,16 @@ impl BTree {
 
     /// Delete a key-value from the tree.
     ///
-    /// # Parameters
+    /// # Panics
     ///
-    /// - key: The key to delete.
+    /// The function can panic in case the internal state of the tree is invalid.
     ///
     /// # Returns
     ///
     /// The deleted value or None if the key did not exist.
     pub fn delete(&mut self, key: Key) -> Option<Vec<u8>> {
-        let old_root_ptr = self.storage.read_root();
-        let root = Node::from_bytes(
-            self.storage
-                .read(old_root_ptr)
-                .expect("invalid tree root pointer"),
-        );
+        let old_root_ptr = self.storage.read_root_ptr();
+        let root = self.storage.read_root();
 
         let (root, val) = root.delete(key.buf, &mut self.storage);
         if val.is_some() {
@@ -134,30 +153,19 @@ impl BTree {
         val
     }
 
-    /// Get a value from the tree.
-    ///
-    /// # Parameters
-    ///
-    /// - key: The key to lookup
-    ///
-    /// # Returns
-    ///
-    /// If the key is found `Some(value)` is returned, otherwise `None` is
-    /// returned.
+    /// Gets a value from the tree if it exists.
+    #[must_use]
     pub fn get(&self, key: Key) -> Option<Vec<u8>> {
-        let root = Node::from_bytes(
-            self.storage
-                .read(self.storage.read_root())
-                .expect("invalid tree root node"),
-        );
+        let root = self.storage.read_root();
         root.find_key(key.buf, &self.storage)
     }
 }
 
-/// The underlying persistent storage for the BTree.
+/// The underlying persistent storage for the [`BTree`].
 ///
 /// The storage handles storing metadata for the tree and also manages
 /// the freelist to make memory usage more efficient.
+#[allow(clippy::module_name_repetitions)]
 pub struct BtreeStorage {
     inner: Box<dyn PageStorage>,
 }
@@ -166,6 +174,10 @@ impl BtreeStorage {
     /// The master page pointer
     const MASTER: u64 = 0;
 
+    /// Create an empty in-memory storage.
+    ///
+    /// The storage will store the [`BTree`] in main memory.
+    #[must_use]
     pub fn in_memory() -> Self {
         Self::new(Box::new(VecStorage::new()))
     }
@@ -192,7 +204,16 @@ impl BtreeStorage {
             .expect("the master page should always be allocated");
     }
 
-    fn read_root(&self) -> u64 {
+    fn read_root(&self) -> Node {
+        let ptr = self.read_root_ptr();
+        Node::from_bytes(
+            self.inner
+                .read(ptr)
+                .expect("the root pointer should always be valid"),
+        )
+    }
+
+    fn read_root_ptr(&self) -> u64 {
         let master = self
             .read(Self::MASTER)
             .expect("the master page should always be allocated");
@@ -205,6 +226,7 @@ impl BtreeStorage {
     }
 
     fn defer_deallocate(&mut self, _ptr: u64) {
+        let _ = self;
         // NOOP
     }
 
@@ -230,7 +252,7 @@ mod bnode {
     const HEADER_SIZE: usize = 4;
     const KV_HEADER_SIZE: usize = 4;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone, Copy)]
     enum NodeType {
         Internal,
         Leaf,
@@ -252,7 +274,7 @@ mod bnode {
     /// There are two types of nodes, leaf and internal nodes. Leaf nodes store
     /// actual key-values while internal nodes store pointers to other nodes.
     /// Note that the pointers stored in internal nodes are not normal pointers,
-    /// but pointers from [`PageStorage`]. Internal nodes have keys that
+    /// but pointers from [`BtreeStorage`]. Internal nodes have keys that
     /// correspond to the first key of the pointed to nodes. Keys in the node
     /// are always sorted.
     ///
@@ -370,11 +392,7 @@ mod bnode {
             node
         }
 
-        /// Borrow the node data and convert it to a PageBuffer.
-        ///
-        /// # Returns
-        ///
-        /// A Result containing the PageBuffer if the data fits in a page.
+        /// Borrow the node data and convert it to a [`PageBuffer`] if possible.
         pub fn as_buffer(&self) -> Result<PageBuffer, DataTooLargeError> {
             PageBuffer::new(&self.data[0..self.size()])
         }
@@ -686,7 +704,7 @@ mod bnode {
             // Offsets need to be strictly increasing since key-values can't have non-positive
             // size (even an empty node as size 4 (key-length + value-length)).
             for i in 1..self.num_values() {
-                assert!(self.offset(i - 1) < self.offset(i))
+                assert!(self.offset(i - 1) < self.offset(i));
             }
         }
 
@@ -815,6 +833,8 @@ mod bnode {
                 NodeType::Internal => 1_u16,
                 NodeType::Leaf => 2_u16,
             };
+            // The number of values will always be small since it needs to fit in a page.
+            #[allow(clippy::cast_possible_truncation)]
             let num_values = num_values as u16;
 
             self.data[0..2].copy_from_slice(&node_type.to_le_bytes());
@@ -849,6 +869,8 @@ mod bnode {
                 return;
             }
 
+            // Offset is a byte index into a page, which always fits in a u16.
+            #[allow(clippy::cast_possible_truncation)]
             let offset = offset as u16;
             let start = self.offset_section_start() + 2 * (index - 1);
 
@@ -913,7 +935,7 @@ mod bnode {
             }
         }
 
-        for i in 1..count + 1 {
+        for i in 1..=count {
             node.set_offset(
                 start_node + i,
                 node.offset(start_node) + other.offset(start_other + i) - other.offset(start_other),
@@ -932,8 +954,15 @@ mod bnode {
 
     fn append_kv(node: &mut Node, index: usize, key: &[u8], value: &[u8]) {
         let kv_start = node.kv_position(index);
-        node.data[kv_start..kv_start + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
-        node.data[kv_start + 2..kv_start + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+
+        // Keys and values are guaranteed to smaller than the `PAGE_SIZE` which fits in a u16.
+        #[allow(clippy::cast_possible_truncation)]
+        let keylen = key.len() as u16;
+        #[allow(clippy::cast_possible_truncation)]
+        let valuelen = value.len() as u16;
+
+        node.data[kv_start..kv_start + 2].copy_from_slice(&keylen.to_le_bytes());
+        node.data[kv_start + 2..kv_start + 4].copy_from_slice(&valuelen.to_le_bytes());
         node.data[kv_start + 4..kv_start + 4 + key.len()].copy_from_slice(key);
         node.data[kv_start + 4 + key.len()..kv_start + 4 + key.len() + value.len()]
             .copy_from_slice(value);
