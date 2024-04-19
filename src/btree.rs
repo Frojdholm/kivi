@@ -80,13 +80,13 @@ impl<'a> Value<'a> {
 
 /// A B+-Tree backed by some storage.
 pub struct BTree {
-    storage: BtreeStorage,
+    storage: BTreeStorage,
 }
 
 impl BTree {
     /// Create a new `BTree`.
     #[must_use]
-    pub fn new(storage: BtreeStorage) -> Self {
+    pub fn new(storage: BTreeStorage) -> Self {
         Self { storage }
     }
 
@@ -166,11 +166,11 @@ impl BTree {
 /// The storage handles storing metadata for the tree and also manages
 /// the freelist to make memory usage more efficient.
 #[allow(clippy::module_name_repetitions)]
-pub struct BtreeStorage {
+pub struct BTreeStorage {
     inner: Box<dyn PageStorage>,
 }
 
-impl BtreeStorage {
+impl BTreeStorage {
     /// The master page pointer
     const MASTER: u64 = 0;
 
@@ -182,6 +182,11 @@ impl BtreeStorage {
         Self::new(Box::new(VecStorage::new()))
     }
 
+    // Create a new `BTreeStorage` over a `PageStorage`.
+    //
+    // # Panics
+    //
+    // If the page storage is not empty and contains an invalid master page.
     fn new(inner: Box<dyn PageStorage>) -> Self {
         let mut storage = Self { inner };
 
@@ -247,7 +252,7 @@ mod bnode {
     use crate::storage::{DataTooLargeError, PageBuffer};
     use crate::PAGE_SIZE;
 
-    use super::{BtreeStorage, Ptr};
+    use super::{BTreeStorage, Ptr};
 
     const HEADER_SIZE: usize = 4;
     const KV_HEADER_SIZE: usize = 4;
@@ -274,7 +279,7 @@ mod bnode {
     /// There are two types of nodes, leaf and internal nodes. Leaf nodes store
     /// actual key-values while internal nodes store pointers to other nodes.
     /// Note that the pointers stored in internal nodes are not normal pointers,
-    /// but pointers from [`BtreeStorage`]. Internal nodes have keys that
+    /// but pointers from [`BTreeStorage`]. Internal nodes have keys that
     /// correspond to the first key of the pointed to nodes. Keys in the node
     /// are always sorted.
     ///
@@ -368,7 +373,7 @@ mod bnode {
         /// # Returns
         ///
         /// The new internal node.
-        pub fn new_internal(nodes: Vec<Self>, storage: &mut BtreeStorage) -> Self {
+        pub fn new_internal(nodes: Vec<Self>, storage: &mut BTreeStorage) -> Self {
             // size = 10 (u64 + u16, pointer + offset) + KV_size
             let element_size = |n: &Node, i| 10 + 4 + n.key(i).len();
 
@@ -407,7 +412,7 @@ mod bnode {
         /// # Returns
         ///
         /// The value if the key exists in the tree.
-        pub fn find_key(&self, key: &[u8], storage: &BtreeStorage) -> Option<Vec<u8>> {
+        pub fn find_key(&self, key: &[u8], storage: &BTreeStorage) -> Option<Vec<u8>> {
             let index = self.find_index(key);
             match self.node_type() {
                 NodeType::Internal => {
@@ -450,7 +455,7 @@ mod bnode {
             &self,
             key: &[u8],
             value: &[u8],
-            storage: &mut BtreeStorage,
+            storage: &mut BTreeStorage,
         ) -> (Self, Option<Vec<u8>>) {
             let index = self.find_index(key);
 
@@ -499,7 +504,7 @@ mod bnode {
         /// # Returns
         ///
         /// The newly created node and the value being deleted.
-        pub fn delete(self, key: &[u8], storage: &mut BtreeStorage) -> (Self, Option<Vec<u8>>) {
+        pub fn delete(self, key: &[u8], storage: &mut BTreeStorage) -> (Self, Option<Vec<u8>>) {
             let index = self.find_index(key);
             match self.node_type() {
                 NodeType::Leaf => {
@@ -649,7 +654,7 @@ mod bnode {
             &self,
             index: usize,
             nodes: Vec<Self>,
-            storage: &mut BtreeStorage,
+            storage: &mut BTreeStorage,
         ) -> Self {
             let inc = nodes.len();
 
@@ -1062,7 +1067,7 @@ mod tests {
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(b"value").unwrap();
         let eulav = Value::new(b"eulav").unwrap();
-        let mut tree = BTree::new(BtreeStorage::in_memory());
+        let mut tree = BTree::new(BTreeStorage::in_memory());
 
         assert!(tree.get(non_existent).is_none());
         assert!(tree.insert(key, value).is_none());
@@ -1081,7 +1086,7 @@ mod tests {
 
     #[test]
     fn test_insert_many_in_tree() {
-        let mut tree = BTree::new(BtreeStorage::in_memory());
+        let mut tree = BTree::new(BTreeStorage::in_memory());
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(&[0_u8; 100]).unwrap();
 
@@ -1120,7 +1125,7 @@ mod tests {
         let key = Key::new(b"key").unwrap();
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(b"value").unwrap();
-        let mut tree = BTree::new(BtreeStorage::in_memory());
+        let mut tree = BTree::new(BTreeStorage::in_memory());
 
         assert!(tree.delete(key).is_none());
 
@@ -1137,7 +1142,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_delete_many_in_tree() {
-        let mut tree = BTree::new(BtreeStorage::in_memory());
+        let mut tree = BTree::new(BTreeStorage::in_memory());
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(&[0_u8; 100]).unwrap();
 
