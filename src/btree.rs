@@ -47,7 +47,7 @@ impl<'a> Key<'a> {
     /// # Errors
     ///
     /// The key is invalid if it's larger than [`MAX_KEY_SIZE`] or is the empty
-    /// key (`b""`). See [`InvalidKey`] for more information.
+    /// key (`b""`). See [`InvalidKeyError`] for more information.
     pub fn new(buf: &'a [u8]) -> Result<Self, InvalidKeyError> {
         if buf.is_empty() || buf.len() > MAX_KEY_SIZE {
             Err(InvalidKeyError { size: buf.len() })
