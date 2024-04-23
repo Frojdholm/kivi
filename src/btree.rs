@@ -167,6 +167,7 @@ impl BTree {
 /// the freelist to make memory usage more efficient.
 #[allow(clippy::module_name_repetitions)]
 pub struct BTreeStorage {
+    master: MasterPage,
     inner: Box<dyn PageStorage>,
 }
 
@@ -188,55 +189,58 @@ impl BTreeStorage {
     //
     // If the page storage is not empty and contains an invalid master page.
     fn new(inner: Box<dyn PageStorage>) -> Self {
-        let mut storage = Self { inner };
+        let mut inner = inner;
 
-        if let Ok(()) = storage.inner.allocate_ptr(Self::MASTER) {
-            let empty = Node::empty_leaf();
-            let data = PageBuffer::new(&empty.data)
-                .expect("empty node data is always smaller than a page");
-            let root = storage.allocate(data);
-            storage.write_root(root);
-        }
+        let master = if let Ok(()) = inner.allocate_ptr(Self::MASTER) {
+            let empty_root = Node::empty_leaf();
+            let root = inner.allocate(&empty_root.data);
+            let freelist = inner.allocate(&[]);
 
-        // TODO: verify that the master page is correctly initialized
-        storage
+            let mut master = MasterPage::new(root, freelist);
+            master.commit(&mut *inner);
+            master
+        } else {
+            // Master page was already allocated so verify the layout.
+            let master = inner
+                .read(Self::MASTER)
+                .expect("the master page should always be allocated");
+
+            MasterPage::from_bytes(&master)
+        };
+
+        Self { master, inner }
     }
 
     fn write_root(&mut self, root: u64) {
-        let root_buf = root.to_le_bytes();
-        let data = PageBuffer::new(&root_buf).expect("pointers are always smaller than a page");
-        self.write(Self::MASTER, data)
-            .expect("the master page should always be allocated");
+        self.master.root = root;
+        self.master.commit(&mut *self.inner);
     }
 
     fn read_root(&self) -> Node {
-        let ptr = self.read_root_ptr();
         Node::from_bytes(
             self.inner
-                .read(ptr)
+                .read(self.master.root)
                 .expect("the root pointer should always be valid"),
         )
     }
 
     fn read_root_ptr(&self) -> u64 {
-        let master = self
-            .read(Self::MASTER)
-            .expect("the master page should always be allocated");
-
-        u64::from_le_bytes(
-            master[0..8]
-                .try_into()
-                .expect("the master page should always store the root pointer"),
-        )
+        self.master.root
     }
 
-    fn deallocate(&mut self, _ptr: u64) {
-        let _ = self;
-        // NOOP
+    fn deallocate(&mut self, ptr: u64) {
+        self.master.freelist.push(ptr, &mut *self.inner);
     }
 
     fn allocate(&mut self, data: PageBuffer) -> u64 {
-        self.inner.allocate(data.buf)
+        let ptr = self.master.freelist.pop(&mut *self.inner);
+        if ptr != 0 {
+            self.write(ptr, data)
+                .expect("freelist pointers should always be allocated");
+            ptr
+        } else {
+            self.inner.allocate(data.buf)
+        }
     }
 
     fn read(&self, ptr: u64) -> Option<Vec<u8>> {
@@ -245,6 +249,235 @@ impl BTreeStorage {
 
     fn write(&mut self, ptr: u64, data: PageBuffer) -> Result<(), PageNotAllocatedError> {
         self.inner.write(ptr, data.buf)
+    }
+}
+
+/// In-memory representation of the master page.
+///
+/// The master page on-disk representation is:
+/// ```text
+/// 'kividata'         8 * u8
+/// <reserved>         u64
+/// num_pages          u64
+/// tree_root          u64
+/// freelist_head      u64
+/// freelist_head_seq  u64
+/// freelist_tail      u64
+/// freelist_tail_seq  u64
+/// ```
+#[derive(Debug)]
+struct MasterPage {
+    num_pages: u64,
+    root: u64,
+    freelist: FreeList,
+}
+
+impl MasterPage {
+    fn new(root: u64, freelist: u64) -> Self {
+        let freelist = FreeList {
+            head: freelist,
+            head_seq: 0,
+            tail: freelist,
+            tail_seq: 0,
+            max_seq: 0,
+        };
+
+        Self {
+            num_pages: 3, // tree_root + freelist + master_page
+            root,
+            freelist,
+        }
+    }
+
+    fn commit(&mut self, storage: &mut dyn PageStorage) {
+        self.num_pages = storage.allocated() as u64;
+        self.freelist.set_max_seq();
+
+        let bytes = self.to_bytes();
+
+        storage
+            .write(BTreeStorage::MASTER, &bytes)
+            .expect("the master page should always be allocated");
+    }
+
+    /// Convert the in-memory master page to bytes that can be persisted.
+    fn to_bytes(&self) -> [u8; 64] {
+        let mut master_data = [0; 64];
+        master_data[0..8].copy_from_slice(b"kividata");
+        master_data[16..24].copy_from_slice(&self.num_pages.to_le_bytes());
+        master_data[24..32].copy_from_slice(&self.root.to_le_bytes());
+        master_data[32..40].copy_from_slice(&self.freelist.head.to_le_bytes());
+        master_data[40..48].copy_from_slice(&self.freelist.head_seq.to_le_bytes());
+        master_data[48..56].copy_from_slice(&self.freelist.tail.to_le_bytes());
+        master_data[56..64].copy_from_slice(&self.freelist.tail_seq.to_le_bytes());
+        master_data
+    }
+
+    /// Convert persisted bytes to an in-memory master page.
+    ///
+    /// # Panics
+    ///
+    /// If the layout of master page is invalid.
+    fn from_bytes(data: &[u8]) -> Self {
+        Self::verify_layout(data);
+        let num_pages = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        let root = u64::from_le_bytes(data[24..32].try_into().unwrap());
+        let freelist_head = u64::from_le_bytes(data[32..40].try_into().unwrap());
+        let freelist_head_seq = u64::from_le_bytes(data[40..48].try_into().unwrap());
+        let freelist_tail = u64::from_le_bytes(data[48..56].try_into().unwrap());
+        let freelist_tail_seq = u64::from_le_bytes(data[56..64].try_into().unwrap());
+
+        let freelist = FreeList {
+            head: freelist_head,
+            head_seq: freelist_head_seq,
+            tail: freelist_tail,
+            tail_seq: freelist_tail_seq,
+            max_seq: freelist_tail_seq,
+        };
+
+        Self {
+            num_pages,
+            root,
+            freelist,
+        }
+    }
+
+    fn verify_layout(data: &[u8]) {
+        assert!(data.len() >= 64);
+        assert_eq!(&data[0..8], b"kividata");
+        assert_ne!(&data[16..24], b"\0\0\0\0\0\0\0\0"); // num_pages
+        assert_ne!(&data[24..32], b"\0\0\0\0\0\0\0\0"); // tree_root
+        assert_ne!(&data[32..40], b"\0\0\0\0\0\0\0\0"); // freelist_head
+                                                        // freelist_head_seq can be 0
+        assert_ne!(&data[48..56], b"\0\0\0\0\0\0\0\0"); // freelist_tail
+                                                        // freelist_tail_seq can be 0
+    }
+}
+
+#[derive(Debug)]
+struct FreeList {
+    head: u64,
+    head_seq: u64,
+    tail: u64,
+    tail_seq: u64,
+
+    max_seq: u64,
+}
+
+impl FreeList {
+    fn set_max_seq(&mut self) {
+        self.max_seq = self.tail_seq;
+    }
+
+    fn pop(&mut self, storage: &mut dyn PageStorage) -> u64 {
+        if self.head_seq == self.max_seq {
+            return 0;
+        }
+
+        let node = freelist::Node::from_bytes(
+            storage
+                .read(self.head)
+                .expect("freelist pointers should always be valid"),
+        );
+        let index = freelist::seq_to_index(self.head_seq);
+        let ptr = node.get(index);
+
+        if index == freelist::NODE_CAPACITY - 1 {
+            // The freelist should never have no nodes.
+            assert_ne!(node.next(), 0);
+            self.push(self.head, storage);
+            self.head = node.next();
+        }
+
+        self.head_seq += 1;
+        ptr
+    }
+
+    fn push(&mut self, ptr: u64, storage: &mut dyn PageStorage) {
+        let mut node = freelist::Node::from_bytes(
+            storage
+                .read(self.tail)
+                .expect("freelist pointers should always be valid"),
+        );
+
+        let index = freelist::seq_to_index(self.tail_seq);
+        node.set(index, ptr);
+
+        let next_tail_ptr = if index == freelist::NODE_CAPACITY - 1 {
+            let mut next = self.pop(storage);
+            if next == 0 {
+                next = storage.allocate(&[]);
+            }
+            node.set_next(next);
+
+            next
+        } else {
+            self.tail
+        };
+
+        storage
+            .write(self.tail, &node.data)
+            .expect("the tail pointer should always be allocated");
+
+        self.tail = next_tail_ptr;
+        self.tail_seq += 1;
+    }
+}
+
+mod freelist {
+    use crate::PAGE_SIZE;
+
+    /// The number of pointers that can be stored in a node.
+    ///
+    /// A node stores the `next` pointer and `NODE_CAPACITY` page pointers.
+    pub const NODE_CAPACITY: usize = (PAGE_SIZE / 8) - 1;
+
+    /// Convert a sequence number to an index into a node.
+    pub fn seq_to_index(seq: u64) -> usize {
+        // The resulting index is always small so it's safe to cast
+        #[allow(clippy::cast_possible_truncation)]
+        let index = (seq % NODE_CAPACITY as u64) as usize;
+        index
+    }
+
+    /// A node in the freelist.
+    ///
+    /// The freelist is an unrolled linked list where each node has the following format:
+    /// ```text
+    /// next           u64
+    /// <pointer_list> n * u64
+    /// ```
+    pub struct Node {
+        pub data: Vec<u8>,
+    }
+
+    impl Node {
+        pub fn from_bytes(data: Vec<u8>) -> Self {
+            assert!(data.len() >= 16);
+            Self { data }
+        }
+
+        /// Get the next pointer from the node.
+        pub fn next(&self) -> u64 {
+            u64::from_le_bytes(self.data[0..8].try_into().unwrap())
+        }
+
+        /// Set the next pointer in the node.
+        pub fn set_next(&mut self, ptr: u64) {
+            self.data[0..8].copy_from_slice(&ptr.to_le_bytes());
+        }
+
+        pub fn get(&self, index: usize) -> u64 {
+            assert!(index < NODE_CAPACITY);
+            let offset = (index + 1) * 8;
+            u64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap())
+        }
+
+        pub fn set(&mut self, index: usize, ptr: u64) {
+            assert!(index < NODE_CAPACITY);
+            let offset = (index + 1) * 8;
+            self.data[offset..offset + 8].copy_from_slice(&ptr.to_le_bytes());
+        }
     }
 }
 
@@ -1167,5 +1400,39 @@ mod tests {
             assert_eq!(tree.delete(key).unwrap(), value.buf);
             assert!(tree.get(key).is_none());
         }
+    }
+
+    #[test]
+    fn test_storage_reuse_is_working() {
+        let key = Key::new(b"key").unwrap();
+        let value = Value::new(b"value").unwrap();
+        let mut tree = BTree::new(BTreeStorage::in_memory());
+
+        for _ in 0..10000 {
+            tree.insert(key, value);
+            //assert!(tree.get(key).is_none());
+            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.delete(key).unwrap(), value.buf);
+            assert_eq!(
+                tree.storage.master.num_pages,
+                tree.storage.inner.allocated() as u64
+            );
+        }
+
+        let allocated = tree.storage.master.num_pages;
+
+        for _ in 0..10000 {
+            tree.insert(key, value);
+            //assert!(tree.get(key).is_none());
+            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.delete(key).unwrap(), value.buf);
+            assert_eq!(
+                tree.storage.master.num_pages,
+                tree.storage.inner.allocated() as u64
+            );
+        }
+
+        // Make sure memory does not increase
+        assert_eq!(allocated, tree.storage.master.num_pages);
     }
 }
