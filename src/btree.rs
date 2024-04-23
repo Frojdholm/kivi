@@ -211,11 +211,13 @@ impl BTreeStorage {
         Self { master, inner }
     }
 
+    /// Write a new root pointer to the persisted master page.
     fn write_root(&mut self, root: u64) {
         self.master.root = root;
         self.master.commit(&mut *self.inner);
     }
 
+    /// Read the root node into an in-memory [`bnode::Node`].
     fn read_root(&self) -> Node {
         Node::from_bytes(
             self.inner
@@ -224,14 +226,24 @@ impl BTreeStorage {
         )
     }
 
+    /// Get the root pointer.
     fn read_root_ptr(&self) -> u64 {
         self.master.root
     }
 
+    /// Deallocate a page.
+    ///
+    /// This function is safe to call during a tree operation and in-case
+    /// of power loss no data will be corrupted.
     fn deallocate(&mut self, ptr: u64) {
         self.master.freelist.push(ptr, &mut *self.inner);
     }
 
+    /// Allocate a page and store data in it.
+    ///
+    /// # Returns
+    ///
+    /// The pointer to the allocated page.
     fn allocate(&mut self, data: PageBuffer) -> u64 {
         let ptr = self.master.freelist.pop(&mut *self.inner);
         if ptr != 0 {
@@ -243,10 +255,17 @@ impl BTreeStorage {
         }
     }
 
+    /// Read the bytes stored at `ptr`.
     fn read(&self, ptr: u64) -> Option<Vec<u8>> {
         self.inner.read(ptr)
     }
 
+    /// Write data to the page at `ptr`.
+    ///
+    /// # Errors
+    ///
+    /// If the page being written has not been allocated a [`PageNotAllocatedError`]
+    /// is returned.
     fn write(&mut self, ptr: u64, data: PageBuffer) -> Result<(), PageNotAllocatedError> {
         self.inner.write(ptr, data.buf)
     }
@@ -254,7 +273,7 @@ impl BTreeStorage {
 
 /// In-memory representation of the master page.
 ///
-/// The master page on-disk representation is:
+/// The master page persisted representation is:
 /// ```text
 /// 'kividata'         8 * u8
 /// <reserved>         u64
@@ -273,6 +292,10 @@ struct MasterPage {
 }
 
 impl MasterPage {
+    /// Create a new `MasterPage`.
+    ///
+    /// This creates the in-memory representation of the `MasterPage`, but it
+    /// will still need to be persisted to storage.
     fn new(root: u64, freelist: u64) -> Self {
         let freelist = FreeList {
             head: freelist,
@@ -282,6 +305,8 @@ impl MasterPage {
             max_seq: 0,
         };
 
+        // num_pages should be 3 here, but it will be overwritten on the
+        // next commit before this value can be used.
         Self {
             num_pages: 3, // tree_root + freelist + master_page
             root,
@@ -289,6 +314,13 @@ impl MasterPage {
         }
     }
 
+    /// Commit the `MasterPage` to storage.
+    ///
+    /// This will both commit the current in-memory version of the page to
+    /// storage and setup up the page for the next tree operation.
+    ///
+    /// After committing the in-memory representation of the `MasterPage`
+    /// will be ready to accept new memory operations.
     fn commit(&mut self, storage: &mut dyn PageStorage) {
         self.num_pages = storage.allocated() as u64;
         self.freelist.set_max_seq();
@@ -301,6 +333,10 @@ impl MasterPage {
     }
 
     /// Convert the in-memory master page to bytes that can be persisted.
+    ///
+    /// This is an internal function used to convert the in-memory representation
+    /// to something that can be persisted. This function should generally not be
+    /// used directly and [`MasterPage::commit`] should be used instead.
     fn to_bytes(&self) -> [u8; 64] {
         let mut master_data = [0; 64];
         master_data[0..8].copy_from_slice(b"kividata");
@@ -342,6 +378,11 @@ impl MasterPage {
         }
     }
 
+    /// Verify that the bytes represented by data is a `MasterPage`.
+    ///
+    /// # Panics
+    ///
+    /// If the data layout does not describe a `MasterPage`.
     fn verify_layout(data: &[u8]) {
         assert!(data.len() >= 64);
         assert_eq!(&data[0..8], b"kividata");
@@ -354,21 +395,58 @@ impl MasterPage {
     }
 }
 
+/// A self-managed list of free pages.
+///
+/// This contains both pointers to pages containing the freelist data and some
+/// in-memory data used to prevent currently active pages from being re-used.
+///
+/// The `FreeList` is an unrolled linked list of pages containing pointers to
+/// unused pages, meaning that each node in the list contains multiple pointers.
+///
+/// The index into the pages is stored as a monotonically increasing sequence
+/// number to allow direct comparison of `head_seq` and `tail_seq`. This gives
+/// some nice properties:
+/// 1. `head_seq` <= `tail_seq` must always be true.
+/// 2. if `head_seq` == `tail_seq` the list is empty.
+/// 3. `tail_seq` can be saved in `max_seq` before starting a tree operation.
+///    Pages pushed to the list will increase `tail_seq`, but as long as
+///    `head_seq` <= `max_seq` no pages that are being deallocated in this
+///    operation will be returned.
 #[derive(Debug)]
 struct FreeList {
+    /// Pointer to the head page of the list.
     head: u64,
+    /// Monotonically increasing sequence number of pages.
+    ///
+    /// This can be converted to the head index into the head page.
     head_seq: u64,
+    /// Pointer to the tail page of the list.
     tail: u64,
+    /// Monotonically increasing sequence number of pages.
+    ///
+    /// This can be converted to the head index into the head page.
     tail_seq: u64,
 
+    /// Maximum sequence allowed for `head_seq` during this tree operation.
+    /// Pages contained in the freelist after this sequence number are still
+    /// part of the tree until the next [`MasterPage::commit`].
+    ///
+    /// This value is not persisted and only exists in memory.
     max_seq: u64,
 }
 
 impl FreeList {
+    /// Set `max_seq` to prevent the list from returning pointers that are currently being deallocated.
     fn set_max_seq(&mut self) {
         self.max_seq = self.tail_seq;
     }
 
+    /// Pop a pointer from the head of the `FreeList`.
+    ///
+    /// If the list is currently empty this function will return 0.
+    ///
+    /// TODO: Change the pointer type to `NonZeroU64` and return
+    /// and `Option`.
     fn pop(&mut self, storage: &mut dyn PageStorage) -> u64 {
         if self.head_seq == self.max_seq {
             return 0;
@@ -385,6 +463,7 @@ impl FreeList {
         if index == freelist::NODE_CAPACITY - 1 {
             // The freelist should never have no nodes.
             assert_ne!(node.next(), 0);
+            // Recycle the head node direcly into the list
             self.push(self.head, storage);
             self.head = node.next();
         }
@@ -393,6 +472,7 @@ impl FreeList {
         ptr
     }
 
+    /// Push a pointer to the tail of the `FreeList`.
     fn push(&mut self, ptr: u64, storage: &mut dyn PageStorage) {
         let mut node = freelist::Node::from_bytes(
             storage
@@ -404,6 +484,9 @@ impl FreeList {
         node.set(index, ptr);
 
         let next_tail_ptr = if index == freelist::NODE_CAPACITY - 1 {
+            // IMPORTANT: First check if there are any free nodes in the list
+            // before allocating a new node. Otherwise memory usage will always
+            // grow each time the tail is full.
             let mut next = self.pop(storage);
             if next == 0 {
                 next = storage.allocate(&[]);
@@ -415,6 +498,11 @@ impl FreeList {
             self.tail
         };
 
+        // TODO: If there is power-loss during an operation the freelist will contain pointers
+        // that are currently part of the tree when loading the tree again.
+        //
+        // Writes to the freelist should probably be cached until all but the master page
+        // has been written to minimize the window where the freelist contains active pointers.
         storage
             .write(self.tail, &node.data)
             .expect("the tail pointer should always be allocated");
@@ -442,18 +530,29 @@ mod freelist {
 
     /// A node in the freelist.
     ///
-    /// The freelist is an unrolled linked list where each node has the following format:
+    /// The freelist is an unrolled linked list where each node has the following
+    /// format:
     /// ```text
     /// next           u64
     /// <pointer_list> n * u64
     /// ```
+    ///
+    /// Note that the number of pointers stored in the node is always
+    /// [`NODE_CAPACITY`]. An index might store a garbage pointer in case it
+    /// hasn't been set currently.
     pub struct Node {
         pub data: Vec<u8>,
     }
 
     impl Node {
+        /// Create a `Node` from bytes.
+        ///
+        /// # Panics
+        ///
+        /// All freelist nodes are page sized, if the data is smaller than
+        /// [`PAGE_SIZE`] this panics.
         pub fn from_bytes(data: Vec<u8>) -> Self {
-            assert!(data.len() >= 16);
+            assert!(data.len() >= PAGE_SIZE);
             Self { data }
         }
 
@@ -467,12 +566,22 @@ mod freelist {
             self.data[0..8].copy_from_slice(&ptr.to_le_bytes());
         }
 
+        /// Get the pointer at an index in the node.
+        ///
+        /// # Panics
+        ///
+        /// If the index is out of bounds.
         pub fn get(&self, index: usize) -> u64 {
             assert!(index < NODE_CAPACITY);
             let offset = (index + 1) * 8;
             u64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap())
         }
 
+        /// Set the pointer at an index in the node.
+        ///
+        /// # Panics
+        ///
+        /// If the index is out of bounds.
         pub fn set(&mut self, index: usize, ptr: u64) {
             assert!(index < NODE_CAPACITY);
             let offset = (index + 1) * 8;
