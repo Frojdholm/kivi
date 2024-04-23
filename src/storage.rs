@@ -58,6 +58,9 @@ impl<'a> PageBuffer<'a> {
 /// TODO: Add a compacting operation that removes holes in the storage.
 #[allow(clippy::module_name_repetitions)]
 pub trait PageStorage {
+    /// Return the number of allocated pages.
+    fn allocated(&self) -> usize;
+
     /// Allocate a pointer.
     ///
     /// Note that allocating a pointer might require all lower pointers to be
@@ -96,27 +99,22 @@ pub trait PageStorage {
 #[allow(clippy::module_name_repetitions)]
 pub struct VecStorage {
     data: Vec<Page>,
-    freelist: Vec<u64>,
 }
 
 impl VecStorage {
     /// Create an empty `VecStorage`
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            data: Vec::new(),
-            freelist: Vec::new(),
-        }
+        Self { data: Vec::new() }
     }
 }
 
 impl PageStorage for VecStorage {
-    fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocatedError> {
-        if let Some(pos) = self.freelist.iter().position(|x| *x == ptr) {
-            self.freelist.remove(pos);
-            return Ok(());
-        }
+    fn allocated(&self) -> usize {
+        self.data.len()
+    }
 
+    fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocatedError> {
         let index: usize = ptr
             .try_into()
             .expect("the number of pages should always fit in usize");
@@ -133,17 +131,10 @@ impl PageStorage for VecStorage {
 
     fn allocate(&mut self, data: &[u8]) -> u64 {
         let data = &data[..PAGE_SIZE.min(data.len())];
-        if let Some(ptr) = self.freelist.pop() {
-            let index: usize = ptr
-                .try_into()
-                .expect("the number of pages should always fit in usize");
-            self.data[index].write(data);
-            ptr
-        } else {
-            let index = self.data.len() as u64;
-            self.data.push(Page::new(data));
-            index
-        }
+        let index = self.data.len() as u64;
+
+        self.data.push(Page::new(data));
+        index
     }
 
     fn read(&self, ptr: u64) -> Option<Vec<u8>> {
@@ -185,11 +176,6 @@ impl Page {
         let mut bytes = vec![0; PAGE_SIZE];
         bytes[..data.len()].copy_from_slice(data);
         Self { bytes }
-    }
-
-    fn write(&mut self, data: &[u8]) {
-        assert!(data.len() <= PAGE_SIZE);
-        self.bytes[..data.len()].copy_from_slice(data);
     }
 }
 
