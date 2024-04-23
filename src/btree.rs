@@ -106,7 +106,7 @@ impl BTree {
 
         let nodes = root.split();
 
-        self.storage.defer_deallocate(old_root_ptr);
+        self.storage.deallocate(old_root_ptr);
 
         let root_ptr = if nodes.len() == 1 {
             self.storage.allocate(
@@ -143,7 +143,7 @@ impl BTree {
 
         let (root, val) = root.delete(key.buf, &mut self.storage);
         if val.is_some() {
-            self.storage.defer_deallocate(old_root_ptr);
+            self.storage.deallocate(old_root_ptr);
             let root_ptr = self.storage.allocate(
                 root.as_buffer()
                     .expect("deleting nodes will make the root node smaller"),
@@ -230,7 +230,7 @@ impl BTreeStorage {
         )
     }
 
-    fn defer_deallocate(&mut self, _ptr: u64) {
+    fn deallocate(&mut self, _ptr: u64) {
         let _ = self;
         // NOOP
     }
@@ -484,7 +484,7 @@ mod bnode {
                     let (node, old_val) = node.insert(key, value, storage);
                     let nodes = node.split();
 
-                    storage.defer_deallocate(ptr);
+                    storage.deallocate(ptr);
                     (self.insert_internal(index, nodes, storage), old_val)
                 }
             }
@@ -531,7 +531,7 @@ mod bnode {
 
                     // IMPORTANT: Deallocating the pointer must happen after we check if val is None
                     // since otherwise the pointer is still valid
-                    storage.defer_deallocate(ptr);
+                    storage.deallocate(ptr);
                     if node.is_empty() {
                         // If the node is empty we delete it from this internal node
                         (self.delete_index(index), val)
