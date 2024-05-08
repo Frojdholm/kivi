@@ -84,10 +84,14 @@ pub struct BTree {
 }
 
 impl BTree {
-    /// Create a new `BTree`.
+    /// Create a new in memory `BTree`
+    ///
+    /// The in memory `BTree` stores data in main memory instead of on disk.
     #[must_use]
-    pub fn new(storage: BTreeStorage) -> Self {
-        Self { storage }
+    pub fn in_memory() -> Self {
+        Self {
+            storage: BTreeStorage::in_memory(),
+        }
     }
 
     /// Insert or update a key-value in the tree.
@@ -165,8 +169,7 @@ impl BTree {
 ///
 /// The storage handles storing metadata for the tree and also manages
 /// the freelist to make memory usage more efficient.
-#[allow(clippy::module_name_repetitions)]
-pub struct BTreeStorage {
+struct BTreeStorage {
     master: MasterPage,
     inner: Box<dyn PageStorage>,
 }
@@ -179,7 +182,7 @@ impl BTreeStorage {
     ///
     /// The storage will store the [`BTree`] in main memory.
     #[must_use]
-    pub fn in_memory() -> Self {
+    fn in_memory() -> Self {
         Self::new(Box::new(VecStorage::new()))
     }
 
@@ -1409,7 +1412,7 @@ mod tests {
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(b"value").unwrap();
         let eulav = Value::new(b"eulav").unwrap();
-        let mut tree = BTree::new(BTreeStorage::in_memory());
+        let mut tree = BTree::in_memory();
 
         assert!(tree.get(non_existent).is_none());
         assert!(tree.insert(key, value).is_none());
@@ -1428,7 +1431,7 @@ mod tests {
 
     #[test]
     fn test_insert_many_in_tree() {
-        let mut tree = BTree::new(BTreeStorage::in_memory());
+        let mut tree = BTree::in_memory();
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(&[0_u8; 100]).unwrap();
 
@@ -1453,7 +1456,9 @@ mod tests {
         }
 
         // Check that the storage can be loaded correctly into a new BTree
-        let tree_clone = BTree::new(tree.storage);
+        let tree_clone = BTree {
+            storage: tree.storage,
+        };
         assert!(tree_clone.get(non_existent).is_none());
         for i in 0_u64..200_u64 {
             let buf = i.to_le_bytes();
@@ -1467,7 +1472,7 @@ mod tests {
         let key = Key::new(b"key").unwrap();
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(b"value").unwrap();
-        let mut tree = BTree::new(BTreeStorage::in_memory());
+        let mut tree = BTree::in_memory();
 
         assert!(tree.delete(key).is_none());
 
@@ -1484,7 +1489,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_delete_many_in_tree() {
-        let mut tree = BTree::new(BTreeStorage::in_memory());
+        let mut tree = BTree::in_memory();
         let non_existent = Key::new(b"non-existent").unwrap();
         let value = Value::new(&[0_u8; 100]).unwrap();
 
@@ -1515,7 +1520,7 @@ mod tests {
     fn test_storage_reuse_is_working() {
         let key = Key::new(b"key").unwrap();
         let value = Value::new(b"value").unwrap();
-        let mut tree = BTree::new(BTreeStorage::in_memory());
+        let mut tree = BTree::in_memory();
 
         for _ in 0..10000 {
             tree.insert(key, value);

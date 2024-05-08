@@ -1,4 +1,4 @@
-use kivi::btree::{BTree, BTreeStorage, Key, Value};
+use kivi::btree::{BTree, Key, Value};
 
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
@@ -41,7 +41,7 @@ fn check_consistency(tree: &BTree, reference: &HashMap<u64, u64>) {
 }
 
 fn main() {
-    let mut tree = BTree::new(BTreeStorage::in_memory());
+    let mut tree = BTree::in_memory();
     let mut reference: HashMap<u64, u64> = HashMap::new();
     let mut rng = Pcg32::seed_from_u64(42);
 
