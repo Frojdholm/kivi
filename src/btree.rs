@@ -5,7 +5,7 @@
 
 use std::{fmt::Display, io, path::Path};
 
-use crate::storage::{Disk, PageBuffer, PageStorage, VecStorage};
+use crate::storage::{Disk, PageBuffer, PageStorage, Memory};
 
 use bnode::Node;
 
@@ -312,9 +312,9 @@ impl BTreeStorage {
     /// The storage will store the [`BTree`] in main memory.
     #[must_use]
     fn in_memory() -> Self {
-        // Since the VecStorage is backed by RAM we can never fail to
+        // Since the in-memory storage is backed by RAM we can never fail to
         // write the master page so construction cannot fail
-        Self::new(Box::new(VecStorage::new())).unwrap()
+        Self::new(Box::new(Memory::new())).unwrap()
     }
 
     /// Create an empty in-memory storage.

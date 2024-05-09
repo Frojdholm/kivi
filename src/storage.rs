@@ -208,20 +208,19 @@ impl PageStorage for Disk {
 
 /// An in-memory storage.
 #[derive(Debug, Default, Clone)]
-#[allow(clippy::module_name_repetitions)]
-pub struct VecStorage {
+pub struct Memory {
     data: Vec<Page>,
 }
 
-impl VecStorage {
-    /// Create an empty `VecStorage`
+impl Memory {
+    /// Create an empty in-memory storage
     #[must_use]
     pub fn new() -> Self {
         Self { data: Vec::new() }
     }
 }
 
-impl PageStorage for VecStorage {
+impl PageStorage for Memory {
     fn allocated(&self) -> u64 {
         self.data.len() as u64
     }
@@ -329,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_allocated_pointers_are_unique() {
-        allocated_pointers_are_unique(VecStorage::new());
+        allocated_pointers_are_unique(Memory::new());
         allocated_pointers_are_unique(Disk {
             file: tempfile::tempfile().unwrap(),
             num_pages: 0,
@@ -338,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_empty_storage_get_should_return_none() {
-        empty_storage_get_should_return_none(VecStorage::new());
+        empty_storage_get_should_return_none(Memory::new());
         empty_storage_get_should_return_none(Disk {
             file: tempfile::tempfile().unwrap(),
             num_pages: 0,
@@ -347,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_allocated_pointer_can_be_read() {
-        allocated_pointer_can_be_read(VecStorage::new());
+        allocated_pointer_can_be_read(Memory::new());
         allocated_pointer_can_be_read(Disk {
             file: tempfile::tempfile().unwrap(),
             num_pages: 0,
