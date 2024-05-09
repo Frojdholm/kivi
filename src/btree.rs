@@ -5,7 +5,7 @@
 
 use std::{fmt::Display, io, path::Path};
 
-use crate::storage::{FileStorage, PageBuffer, PageStorage, VecStorage};
+use crate::storage::{Disk, PageBuffer, PageStorage, VecStorage};
 
 use bnode::Node;
 
@@ -326,7 +326,7 @@ impl BTreeStorage {
     /// If creating a `BTreeStorage` from the path is not possible this function
     /// returns an error.
     fn from_path(path: &Path) -> Result<Self, Error> {
-        Self::new(Box::new(FileStorage::from_path(path)?))
+        Self::new(Box::new(Disk::from_path(path)?))
     }
 
     // Create a new `BTreeStorage` over a `PageStorage`.

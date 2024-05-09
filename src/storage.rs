@@ -113,14 +113,13 @@ pub trait PageStorage {
 
 /// A file-backed storage.
 #[derive(Debug)]
-#[allow(clippy::module_name_repetitions)]
-pub struct FileStorage {
+pub struct Disk {
     file: File,
     num_pages: u64,
 }
 
-impl FileStorage {
-    /// Create a `FileStorage` from the path.
+impl Disk {
+    /// Create a `Disk` from the path.
     ///
     /// # Errors
     ///
@@ -136,9 +135,8 @@ impl FileStorage {
         let metadata = std::fs::metadata(path)?;
         Ok(Self {
             file,
-            // Note that this constructs the file storage over the valid
-            // part of the file, if there is extra space for some reason
-            // that is ignored.
+            // Note that this constructs the storage over the aligned part of the
+            // file, if there is extra space for some reason that is ignored.
             num_pages: metadata.len() / PAGE_SIZE as u64,
         })
     }
@@ -165,7 +163,7 @@ impl FileStorage {
     }
 }
 
-impl PageStorage for FileStorage {
+impl PageStorage for Disk {
     fn sync(&mut self) -> io::Result<()> {
         self.file.sync_all()
     }
@@ -332,7 +330,7 @@ mod tests {
     #[test]
     fn test_allocated_pointers_are_unique() {
         allocated_pointers_are_unique(VecStorage::new());
-        allocated_pointers_are_unique(FileStorage {
+        allocated_pointers_are_unique(Disk {
             file: tempfile::tempfile().unwrap(),
             num_pages: 0,
         });
@@ -341,7 +339,7 @@ mod tests {
     #[test]
     fn test_empty_storage_get_should_return_none() {
         empty_storage_get_should_return_none(VecStorage::new());
-        empty_storage_get_should_return_none(FileStorage {
+        empty_storage_get_should_return_none(Disk {
             file: tempfile::tempfile().unwrap(),
             num_pages: 0,
         });
@@ -350,7 +348,7 @@ mod tests {
     #[test]
     fn test_allocated_pointer_can_be_read() {
         allocated_pointer_can_be_read(VecStorage::new());
-        allocated_pointer_can_be_read(FileStorage {
+        allocated_pointer_can_be_read(Disk {
             file: tempfile::tempfile().unwrap(),
             num_pages: 0,
         });
