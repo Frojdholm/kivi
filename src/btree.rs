@@ -88,11 +88,11 @@ pub struct Value<'a> {
 }
 
 impl<'a> Value<'a> {
-    /// Create a new key.
+    /// Create a new `Value`.
     ///
     /// # Errors
     ///
-    /// The key is invalid if it's larger than [`MAX_VAL_SIZE`].
+    /// The buffer cannot be larger than [`MAX_VAL_SIZE`].
     pub fn new(buf: &'a [u8]) -> Result<Self, ValueTooLargeError> {
         if buf.len() > MAX_VAL_SIZE {
             Err(ValueTooLargeError)
