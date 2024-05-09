@@ -59,7 +59,7 @@ impl<'a> PageBuffer<'a> {
 #[allow(clippy::module_name_repetitions)]
 pub trait PageStorage {
     /// Return the number of allocated pages.
-    fn allocated(&self) -> usize;
+    fn allocated(&self) -> u64;
 
     /// Allocate a pointer.
     ///
@@ -110,8 +110,8 @@ impl VecStorage {
 }
 
 impl PageStorage for VecStorage {
-    fn allocated(&self) -> usize {
-        self.data.len()
+    fn allocated(&self) -> u64 {
+        self.data.len() as u64
     }
 
     fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocatedError> {
