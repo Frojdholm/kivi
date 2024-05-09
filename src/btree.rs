@@ -329,7 +329,7 @@ impl BTreeStorage {
         Self::new(Box::new(Disk::from_path(path)?))
     }
 
-    // Create a new `BTreeStorage` over a `PageStorage`.
+    // Create a new `BTreeStorage` over a [`PageStorage`].
     //
     // # Panics
     //
