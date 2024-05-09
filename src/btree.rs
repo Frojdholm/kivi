@@ -3,9 +3,9 @@
 //! In this module a persistent B+-Tree is implemented. The tree implements
 //! insertion, update and deletion of key-values.
 
-use std::{fmt::Display, io};
+use std::{fmt::Display, io, path::Path};
 
-use crate::storage::{PageBuffer, PageStorage, VecStorage};
+use crate::storage::{FileStorage, PageBuffer, PageStorage, VecStorage};
 
 use bnode::Node;
 
@@ -128,6 +128,25 @@ impl BTree {
         }
     }
 
+    /// Create or load a `BTree` from a file.
+    ///
+    /// # Panics
+    ///
+    /// The function panics if the file does not represent a `BTree`.
+    ///
+    /// TODO: Don't panic in this case.
+    ///
+    /// # Errors
+    ///
+    /// If there are issues loading the file.
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        // TODO: Allow the user to open the file in different modes and have
+        // clearer errors for file creation/opening failures.
+        Ok(Self {
+            storage: BTreeStorage::from_path(path.as_ref())?,
+        })
+    }
+
     /// Insert or update a key-value in the tree.
     ///
     /// # Errors
@@ -224,6 +243,18 @@ impl BTreeStorage {
         // Since the VecStorage is backed by RAM we can never fail to
         // write the master page so construction cannot fail
         Self::new(Box::new(VecStorage::new())).unwrap()
+    }
+
+    /// Create an empty in-memory storage.
+    ///
+    /// The storage will store the [`BTree`] in main memory.
+    ///
+    /// # Errors
+    ///
+    /// If creating a `BTreeStorage` from the path is not possible this function
+    /// returns an error.
+    fn from_path(path: &Path) -> Result<Self, Error> {
+        Self::new(Box::new(FileStorage::from_path(path)?))
     }
 
     // Create a new `BTreeStorage` over a `PageStorage`.

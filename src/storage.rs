@@ -4,7 +4,11 @@
 //! with memory. Storage backends defined in these modules are meant to be
 //! wrapped in higher level APIs to handle memory efficiently.
 
-use std::io;
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
+    path::Path,
+};
 
 use crate::PAGE_SIZE;
 
@@ -107,6 +111,103 @@ pub trait PageStorage {
     fn write(&mut self, ptr: u64, data: &[u8]) -> io::Result<()>;
 }
 
+/// A file-backed storage.
+#[derive(Debug)]
+#[allow(clippy::module_name_repetitions)]
+pub struct FileStorage {
+    file: File,
+    num_pages: u64,
+}
+
+impl FileStorage {
+    /// Create a `FileStorage` from the path.
+    ///
+    /// # Errors
+    ///
+    /// If the file does not exist or if the file size is not a multiple
+    /// of the page size this function returns an error.
+    pub fn from_path(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        let metadata = std::fs::metadata(path)?;
+        Ok(Self {
+            file,
+            // Note that this constructs the file storage over the valid
+            // part of the file, if there is extra space for some reason
+            // that is ignored.
+            num_pages: metadata.len() / PAGE_SIZE as u64,
+        })
+    }
+
+    fn seek_to(&self, ptr: u64) -> io::Result<u64> {
+        assert!(ptr < self.num_pages);
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(Self::offset(ptr)))
+    }
+
+    fn allocate_next(&mut self) -> io::Result<u64> {
+        let ptr = self.num_pages;
+        self.num_pages += 1;
+        self.file.set_len(self.size())?;
+        Ok(ptr)
+    }
+
+    fn size(&self) -> u64 {
+        self.num_pages * PAGE_SIZE as u64
+    }
+
+    fn offset(ptr: u64) -> u64 {
+        ptr * PAGE_SIZE as u64
+    }
+}
+
+impl PageStorage for FileStorage {
+    fn sync(&mut self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    fn allocated(&self) -> u64 {
+        self.num_pages
+    }
+
+    fn allocate_ptr(&mut self, ptr: u64) -> io::Result<()> {
+        if ptr < self.num_pages {
+            return Ok(());
+        }
+        self.num_pages = ptr + 1;
+        self.file.set_len(self.size())?;
+        Ok(())
+    }
+
+    fn allocate(&mut self, data: &[u8]) -> io::Result<u64> {
+        let ptr = self.allocate_next()?;
+        self.write(ptr, data)?;
+        Ok(ptr)
+    }
+
+    fn read(&self, ptr: u64) -> io::Result<Option<Vec<u8>>> {
+        if ptr >= self.num_pages {
+            return Ok(None);
+        }
+        self.seek_to(ptr)?;
+        let mut file = &self.file;
+        let mut buf = vec![0_u8; PAGE_SIZE];
+        file.read_exact(&mut buf)?;
+        Ok(Some(buf))
+    }
+
+    fn write(&mut self, ptr: u64, data: &[u8]) -> io::Result<()> {
+        assert!(ptr < self.num_pages, "the pointer must be allocated");
+        self.seek_to(ptr)?;
+        self.file.write_all(data)?;
+        Ok(())
+    }
+}
+
 /// An in-memory storage.
 #[derive(Debug, Default, Clone)]
 #[allow(clippy::module_name_repetitions)]
@@ -197,9 +298,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_allocated_pointers_are_unique() {
-        let mut storage = VecStorage::new();
+    fn allocated_pointers_are_unique<S: PageStorage>(storage: S) {
+        let mut storage = storage;
         let mut ptrs = HashSet::new();
 
         // Allocate a number of pointers
@@ -210,9 +310,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_empty_storage_get_should_return_none() {
-        let storage = VecStorage::new();
+    fn empty_storage_get_should_return_none<S: PageStorage>(storage: S) {
+        let storage = storage;
         assert!(storage.read(1).unwrap().is_none());
         assert!(storage.read(100).unwrap().is_none());
         assert!(storage.read(12).unwrap().is_none());
@@ -220,14 +319,40 @@ mod tests {
         assert!(storage.read(3).unwrap().is_none());
     }
 
-    #[test]
-    fn test_allocated_pointer_can_be_read() {
-        let mut storage = VecStorage::new();
+    fn allocated_pointer_can_be_read<S: PageStorage>(storage: S) {
+        let mut storage = storage;
         let ptr = storage.allocate(b"Hello world").unwrap();
         assert!(storage
             .read(ptr)
             .unwrap()
             .unwrap()
             .starts_with(b"Hello world"));
+    }
+
+    #[test]
+    fn test_allocated_pointers_are_unique() {
+        allocated_pointers_are_unique(VecStorage::new());
+        allocated_pointers_are_unique(FileStorage {
+            file: tempfile::tempfile().unwrap(),
+            num_pages: 0,
+        });
+    }
+
+    #[test]
+    fn test_empty_storage_get_should_return_none() {
+        empty_storage_get_should_return_none(VecStorage::new());
+        empty_storage_get_should_return_none(FileStorage {
+            file: tempfile::tempfile().unwrap(),
+            num_pages: 0,
+        });
+    }
+
+    #[test]
+    fn test_allocated_pointer_can_be_read() {
+        allocated_pointer_can_be_read(VecStorage::new());
+        allocated_pointer_can_be_read(FileStorage {
+            file: tempfile::tempfile().unwrap(),
+            num_pages: 0,
+        });
     }
 }
