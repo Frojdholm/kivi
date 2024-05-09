@@ -3,6 +3,8 @@
 //! In this module a persistent B+-Tree is implemented. The tree implements
 //! insertion, update and deletion of key-values.
 
+use std::fmt::Display;
+
 use crate::storage::{PageBuffer, PageNotAllocatedError, PageStorage, VecStorage};
 
 use bnode::Node;
@@ -78,6 +80,32 @@ impl<'a> Value<'a> {
     }
 }
 
+/// Error type for B+-Tree operations.
+#[derive(Debug)]
+pub enum Error {
+    /// Synchronizing data to disk failed.
+    ///
+    /// When synchronizing fails the problem is in general not recoverable and
+    /// the application will in general need to abort.
+    SyncFailed,
+    /// General failure reading or writing to the storage.
+    StorageError,
+    /// Used when attempting to delete the key and it doesn't exist in the tree.
+    KeyNotFound,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SyncFailed => write!(f, "Synchronizing data to disk failed."),
+            Self::StorageError => write!(f, "Error accessing the storage."),
+            Self::KeyNotFound => write!(f, "The key does not exist in the tree."),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 /// A B+-Tree backed by some storage.
 pub struct BTree {
     storage: BTreeStorage,
@@ -96,6 +124,10 @@ impl BTree {
 
     /// Insert or update a key-value in the tree.
     ///
+    /// # Errors
+    ///
+    /// This function an error if there is an issues accessing the tree.
+    ///
     /// # Panics
     ///
     /// The function can panic in case the internal state of the tree is invalid.
@@ -103,7 +135,7 @@ impl BTree {
     /// # Returns
     ///
     /// The old value if the key-value was updated.
-    pub fn insert(&mut self, key: Key, value: Value) -> Option<Vec<u8>> {
+    pub fn insert(&mut self, key: Key, value: Value) -> Result<Option<Vec<u8>>, Error> {
         let old_root_ptr = self.storage.read_root_ptr();
         let root = self.storage.read_root();
         let (root, old_val) = root.insert(key.buf, value.buf, &mut self.storage);
@@ -129,39 +161,39 @@ impl BTree {
         self.storage.write_root(root_ptr);
         // self.storage.update_freelist();
 
-        old_val
+        Ok(old_val)
     }
 
     /// Delete a key-value from the tree.
     ///
+    /// # Errors
+    ///
+    /// This function returns an error if the key is not found in the tree or
+    /// if there are issues accessing the tree.
+    ///
     /// # Panics
     ///
     /// The function can panic in case the internal state of the tree is invalid.
-    ///
-    /// # Returns
-    ///
-    /// The deleted value or None if the key did not exist.
-    pub fn delete(&mut self, key: Key) -> Option<Vec<u8>> {
+    pub fn delete(&mut self, key: Key) -> Result<Vec<u8>, Error> {
         let old_root_ptr = self.storage.read_root_ptr();
         let root = self.storage.read_root();
 
-        let (root, val) = root.delete(key.buf, &mut self.storage);
-        if val.is_some() {
-            self.storage.deallocate(old_root_ptr);
-            let root_ptr = self.storage.allocate(
-                root.as_buffer()
-                    .expect("deleting nodes will make the root node smaller"),
-            );
-            self.storage.write_root(root_ptr);
-        }
-        val
+        let (root, val) = root.delete(key.buf, &mut self.storage)?;
+        self.storage.deallocate(old_root_ptr);
+        // Deleting nodes should make the root smaller so the buffer should always fit
+        let root_ptr = self.storage.allocate(root.as_buffer().unwrap());
+        self.storage.write_root(root_ptr);
+        Ok(val)
     }
 
     /// Gets a value from the tree if it exists.
-    #[must_use]
-    pub fn get(&self, key: Key) -> Option<Vec<u8>> {
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if there are issues accessing the tree.
+    pub fn get(&self, key: Key) -> Result<Option<Vec<u8>>, Error> {
         let root = self.storage.read_root();
-        root.find_key(key.buf, &self.storage)
+        Ok(root.find_key(key.buf, &self.storage))
     }
 }
 
@@ -597,7 +629,7 @@ mod bnode {
     use crate::storage::{DataTooLargeError, PageBuffer};
     use crate::PAGE_SIZE;
 
-    use super::{BTreeStorage, Ptr};
+    use super::{BTreeStorage, Error, Ptr};
 
     const HEADER_SIZE: usize = 4;
     const KV_HEADER_SIZE: usize = 4;
@@ -839,25 +871,31 @@ mod bnode {
         ///
         ///
         /// Note that the nodes are immutable and this will create a new node.
-        /// If the key does not exist this is a NOP.
         ///
         /// # Parameters
         ///
         /// - key: The key to delete.
         /// - storage: The storage where the nodes are stored.
         ///
+        /// # Errors
+        ///
+        /// If the key is not found or if there are issues accessing the storage.
+        ///
         /// # Returns
         ///
         /// The newly created node and the value being deleted.
-        pub fn delete(self, key: &[u8], storage: &mut BTreeStorage) -> (Self, Option<Vec<u8>>) {
+        pub fn delete(
+            self,
+            key: &[u8],
+            storage: &mut BTreeStorage,
+        ) -> Result<(Self, Vec<u8>), Error> {
             let index = self.find_index(key);
             match self.node_type() {
                 NodeType::Leaf => {
                     if self.key(index) == key {
-                        (self.delete_index(index), Some(self.value(index).into()))
+                        Ok((self.delete_index(index), self.value(index).into()))
                     } else {
-                        // The key did not exist so just return ourselves.
-                        (self, None)
+                        Err(Error::KeyNotFound)
                     }
                 }
                 NodeType::Internal => {
@@ -867,22 +905,16 @@ mod bnode {
                             .read(ptr)
                             .expect("pointers stored in internal nodes should always be valid"),
                     );
-                    let (node, val) = node.delete(key, storage);
+                    let (node, val) = node.delete(key, storage)?;
 
-                    // If val is None the key did not exist so we don't need to do anything
-                    if val.is_none() {
-                        return (self, None);
-                    }
-
-                    // IMPORTANT: Deallocating the pointer must happen after we check if val is None
-                    // since otherwise the pointer is still valid
                     storage.deallocate(ptr);
                     if node.is_empty() {
                         // If the node is empty we delete it from this internal node
-                        (self.delete_index(index), val)
+                        Ok((self.delete_index(index), val))
                     } else {
                         // This will automatically update the key in case the first key in the node got deleted.
-                        (self.insert_internal(index, vec![node], storage), val)
+                        let node = self.insert_internal(index, vec![node], storage);
+                        Ok((node, val))
                     }
                 }
             }
@@ -1414,14 +1446,14 @@ mod tests {
         let eulav = Value::new(b"eulav").unwrap();
         let mut tree = BTree::in_memory();
 
-        assert!(tree.get(non_existent).is_none());
-        assert!(tree.insert(key, value).is_none());
-        assert_eq!(tree.get(key).unwrap(), b"value");
-        assert!(tree.get(non_existent).is_none());
+        assert!(tree.get(non_existent).unwrap().is_none());
+        assert!(tree.insert(key, value).unwrap().is_none());
+        assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
+        assert!(tree.get(non_existent).unwrap().is_none());
 
-        assert_eq!(tree.insert(key, eulav), Some(value.buf.into()));
-        assert_eq!(tree.get(key).unwrap(), b"eulav");
-        assert!(tree.get(non_existent).is_none());
+        assert_eq!(tree.insert(key, eulav).unwrap(), Some(value.buf.into()));
+        assert_eq!(tree.get(key).ok().flatten().unwrap(), eulav.buf);
+        assert!(tree.get(non_existent).unwrap().is_none());
     }
 
     #[test]
@@ -1439,31 +1471,31 @@ mod tests {
         for i in 0_u64..100_u64 {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).is_none());
+            assert!(tree.insert(key, value).unwrap().is_none());
         }
         for i in (100_u64..200_u64).rev() {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).is_none());
+            assert!(tree.insert(key, value).unwrap().is_none());
         }
 
-        assert!(tree.get(non_existent).is_none());
+        assert!(tree.get(non_existent).unwrap().is_none());
 
         for i in 0_u64..200_u64 {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
         }
 
         // Check that the storage can be loaded correctly into a new BTree
         let tree_clone = BTree {
             storage: tree.storage,
         };
-        assert!(tree_clone.get(non_existent).is_none());
+        assert!(tree_clone.get(non_existent).unwrap().is_none());
         for i in 0_u64..200_u64 {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert_eq!(tree_clone.get(key).unwrap(), value.buf);
+            assert_eq!(tree_clone.get(key).ok().flatten().unwrap(), value.buf);
         }
     }
 
@@ -1474,17 +1506,20 @@ mod tests {
         let value = Value::new(b"value").unwrap();
         let mut tree = BTree::in_memory();
 
-        assert!(tree.delete(key).is_none());
+        assert!(matches!(tree.delete(key).unwrap_err(), Error::KeyNotFound));
 
-        assert!(tree.get(non_existent).is_none());
-        assert!(tree.insert(key, value).is_none());
-        assert_eq!(tree.get(key).unwrap(), b"value");
-        assert!(tree.get(non_existent).is_none());
-        assert!(tree.delete(non_existent).is_none());
+        assert!(tree.get(non_existent).unwrap().is_none());
+        assert!(tree.insert(key, value).unwrap().is_none());
+        assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
+        assert!(tree.get(non_existent).unwrap().is_none());
+        assert!(matches!(
+            tree.delete(non_existent).unwrap_err(),
+            Error::KeyNotFound
+        ));
 
-        assert_eq!(tree.delete(key), Some(value.buf.into()));
-        assert!(tree.get(key).is_none());
-        assert!(tree.get(non_existent).is_none());
+        assert_eq!(tree.delete(key).unwrap(), value.buf);
+        assert!(tree.get(key).unwrap().is_none());
+        assert!(tree.get(non_existent).unwrap().is_none());
     }
 
     #[test]
@@ -1497,22 +1532,22 @@ mod tests {
         for i in 0_u64..100_u64 {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).is_none());
+            assert!(tree.insert(key, value).unwrap().is_none());
         }
         for i in (100_u64..200_u64).rev() {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).is_none());
+            assert!(tree.insert(key, value).unwrap().is_none());
         }
 
-        assert!(tree.get(non_existent).is_none());
+        assert!(tree.get(non_existent).unwrap().is_none());
 
         for i in 0_u64..200_u64 {
             let buf = i.to_le_bytes();
             let key = Key::new(&buf).unwrap();
-            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
             assert_eq!(tree.delete(key).unwrap(), value.buf);
-            assert!(tree.get(key).is_none());
+            assert!(tree.get(key).unwrap().is_none());
         }
     }
 
@@ -1523,9 +1558,9 @@ mod tests {
         let mut tree = BTree::in_memory();
 
         for _ in 0..10000 {
-            tree.insert(key, value);
+            tree.insert(key, value).unwrap();
             //assert!(tree.get(key).is_none());
-            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
             assert_eq!(tree.delete(key).unwrap(), value.buf);
             assert_eq!(
                 tree.storage.master.num_pages,
@@ -1536,9 +1571,9 @@ mod tests {
         let allocated = tree.storage.master.num_pages;
 
         for _ in 0..10000 {
-            tree.insert(key, value);
+            tree.insert(key, value).unwrap();
             //assert!(tree.get(key).is_none());
-            assert_eq!(tree.get(key).unwrap(), value.buf);
+            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
             assert_eq!(tree.delete(key).unwrap(), value.buf);
             assert_eq!(
                 tree.storage.master.num_pages,

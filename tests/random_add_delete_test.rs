@@ -17,7 +17,7 @@ fn insert_kv(tree: &mut BTree, reference: &mut HashMap<u64, u64>, rng: &mut Pcg3
     let key = Key::new(&keybuf).unwrap();
     let value = Value::new(&valuebuf).unwrap();
 
-    tree.insert(key, value);
+    tree.insert(key, value).unwrap();
 }
 
 fn delete_kv(tree: &mut BTree, reference: &mut HashMap<u64, u64>, rng: &mut Pcg32) {
@@ -26,14 +26,14 @@ fn delete_kv(tree: &mut BTree, reference: &mut HashMap<u64, u64>, rng: &mut Pcg3
 
     let keybuf = key.to_le_bytes();
     let key = Key::new(&keybuf).unwrap();
-    tree.delete(key);
+    tree.delete(key).unwrap();
 }
 
 fn check_consistency(tree: &BTree, reference: &HashMap<u64, u64>) {
     for (key, ref_val) in reference.iter() {
         let keybuf = key.to_le_bytes();
         let key = Key::new(&keybuf).unwrap();
-        let value = tree.get(key).unwrap();
+        let value = tree.get(key).ok().flatten().unwrap();
         let value = u64::from_le_bytes(value.try_into().unwrap());
 
         assert_eq!(value, *ref_val);
