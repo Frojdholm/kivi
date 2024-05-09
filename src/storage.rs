@@ -4,6 +4,8 @@
 //! with memory. Storage backends defined in these modules are meant to be
 //! wrapped in higher level APIs to handle memory efficiently.
 
+use std::io;
+
 use crate::PAGE_SIZE;
 
 /// Error returned when data is larger than a page.
@@ -11,20 +13,6 @@ use crate::PAGE_SIZE;
 pub struct DataTooLargeError {
     /// The size of the data that was attempted to be written
     pub size: usize,
-}
-
-/// Error returned when the page being written to is not allocated.
-#[derive(Debug, Clone, Copy)]
-pub struct PageNotAllocatedError {
-    /// The pointer that was attempted to be written to
-    pub ptr: u64,
-}
-
-/// Error returned when the page being allocated is already allocated.
-#[derive(Debug, Clone, Copy)]
-pub struct AlreadyAllocatedError {
-    /// The pointer that was attempted to be allocated
-    pub ptr: u64,
 }
 
 /// A byte buffer guaranteed to fit into a page.
@@ -58,6 +46,15 @@ impl<'a> PageBuffer<'a> {
 /// TODO: Add a compacting operation that removes holes in the storage.
 #[allow(clippy::module_name_repetitions)]
 pub trait PageStorage {
+    /// Sync write operations if needed
+    ///
+    /// # Errors
+    ///
+    /// If the underlying io operation fails this functions errors.
+    fn sync(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Return the number of allocated pages.
     fn allocated(&self) -> u64;
 
@@ -66,22 +63,35 @@ pub trait PageStorage {
     /// Note that allocating a pointer might require all lower pointers to be
     /// allocated.
     ///
+    /// If the pointer has already been allocated this function is a noop.
+    ///
     /// # Errors
     ///
-    /// If the pointer being allocated is already allocated this function returns
-    /// an error instead.
-    fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocatedError>;
+    /// If the underlying io operation fails this functions errors.
+    fn allocate_ptr(&mut self, ptr: u64) -> io::Result<()>;
 
     /// Allocate a page and write data to it.
     ///
     /// If the buffer does not fit into a page it will be truncated.
-    fn allocate(&mut self, data: &[u8]) -> u64;
+    ///
+    /// # Errors
+    ///
+    /// If the underlying io operation fails this functions errors.
+    ///
+    /// # Returns
+    ///
+    /// The newly allocated pointer
+    fn allocate(&mut self, data: &[u8]) -> io::Result<u64>;
 
     /// Read a pointer from the storage.
     ///
     /// If the pointer is allocated the data is copied from the storage and
     /// returned as `Some(data)`, otherwise `None` is returned.
-    fn read(&self, ptr: u64) -> Option<Vec<u8>>;
+    ///
+    /// # Errors
+    ///
+    /// If the underlying io operation fails this functions errors.
+    fn read(&self, ptr: u64) -> io::Result<Option<Vec<u8>>>;
 
     /// Write data to a pointer in the storage.
     ///
@@ -89,9 +99,12 @@ pub trait PageStorage {
     ///
     /// # Errors
     ///
-    /// If the pointer hasn't been allocated this function returns an error
-    /// instead.
-    fn write(&mut self, ptr: u64, data: &[u8]) -> Result<(), PageNotAllocatedError>;
+    /// If the underlying io operation fails this functions errors.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the pointer hasn't been allocated.
+    fn write(&mut self, ptr: u64, data: &[u8]) -> io::Result<()>;
 }
 
 /// An in-memory storage.
@@ -114,48 +127,47 @@ impl PageStorage for VecStorage {
         self.data.len() as u64
     }
 
-    fn allocate_ptr(&mut self, ptr: u64) -> Result<(), AlreadyAllocatedError> {
+    fn allocate_ptr(&mut self, ptr: u64) -> io::Result<()> {
         let index: usize = ptr
             .try_into()
             .expect("the number of pages should always fit in usize");
         if self.data.len() > index {
-            return Err(AlreadyAllocatedError { ptr });
+            return Ok(());
         }
 
         while self.data.len() <= index {
             self.data.push(Page::empty());
         }
-
         Ok(())
     }
 
-    fn allocate(&mut self, data: &[u8]) -> u64 {
+    fn allocate(&mut self, data: &[u8]) -> io::Result<u64> {
         let data = &data[..PAGE_SIZE.min(data.len())];
         let index = self.data.len() as u64;
 
         self.data.push(Page::new(data));
-        index
+        Ok(index)
     }
 
-    fn read(&self, ptr: u64) -> Option<Vec<u8>> {
+    fn read(&self, ptr: u64) -> io::Result<Option<Vec<u8>>> {
         let index: usize = ptr
             .try_into()
             .expect("the number of pages should always fit in usize");
-        self.data.get(index).map(|page| page.bytes.clone())
+        Ok(self.data.get(index).map(|page| page.bytes.clone()))
     }
 
-    fn write(&mut self, ptr: u64, data: &[u8]) -> Result<(), PageNotAllocatedError> {
+    fn write(&mut self, ptr: u64, data: &[u8]) -> io::Result<()> {
+        assert!(
+            ptr < data.len() as u64,
+            "the pointer must always be allocated"
+        );
         let data = &data[..PAGE_SIZE.min(data.len())];
         let index: usize = ptr
             .try_into()
             .expect("the number of pages should always fit in usize");
-        if let Some(page) = self.data.get_mut(index) {
-            page.bytes[..data.len()].copy_from_slice(data);
 
-            Ok(())
-        } else {
-            Err(PageNotAllocatedError { ptr })
-        }
+        self.data[index].bytes[..data.len()].copy_from_slice(data);
+        Ok(())
     }
 }
 
@@ -192,7 +204,7 @@ mod tests {
 
         // Allocate a number of pointers
         for _ in 0..20 {
-            let ptr = storage.allocate(&[]);
+            let ptr = storage.allocate(&[]).unwrap();
             assert!(!ptrs.contains(&ptr));
             ptrs.insert(ptr);
         }
@@ -201,17 +213,21 @@ mod tests {
     #[test]
     fn test_empty_storage_get_should_return_none() {
         let storage = VecStorage::new();
-        assert!(storage.read(1).is_none());
-        assert!(storage.read(100).is_none());
-        assert!(storage.read(12).is_none());
-        assert!(storage.read(2).is_none());
-        assert!(storage.read(3).is_none());
+        assert!(storage.read(1).unwrap().is_none());
+        assert!(storage.read(100).unwrap().is_none());
+        assert!(storage.read(12).unwrap().is_none());
+        assert!(storage.read(2).unwrap().is_none());
+        assert!(storage.read(3).unwrap().is_none());
     }
 
     #[test]
     fn test_allocated_pointer_can_be_read() {
         let mut storage = VecStorage::new();
-        let ptr = storage.allocate(b"Hello world");
-        assert!(storage.read(ptr).unwrap().starts_with(b"Hello world"));
+        let ptr = storage.allocate(b"Hello world").unwrap();
+        assert!(storage
+            .read(ptr)
+            .unwrap()
+            .unwrap()
+            .starts_with(b"Hello world"));
     }
 }

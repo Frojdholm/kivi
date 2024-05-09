@@ -5,7 +5,7 @@
 
 use std::fmt::Display;
 
-use crate::storage::{PageBuffer, PageNotAllocatedError, PageStorage, VecStorage};
+use crate::storage::{PageBuffer, PageStorage, VecStorage};
 
 use bnode::Node;
 
@@ -226,10 +226,12 @@ impl BTreeStorage {
     fn new(inner: Box<dyn PageStorage>) -> Self {
         let mut inner = inner;
 
-        let master = if let Ok(()) = inner.allocate_ptr(Self::MASTER) {
+        let master = if inner.allocated() == 0 {
+            inner.allocate_ptr(Self::MASTER).unwrap();
+
             let empty_root = Node::empty_leaf();
-            let root = inner.allocate(&empty_root.data);
-            let freelist = inner.allocate(&[]);
+            let root = inner.allocate(&empty_root.data).unwrap();
+            let freelist = inner.allocate(&[]).unwrap();
 
             let mut master = MasterPage::new(root, freelist);
             master.commit(&mut *inner);
@@ -238,6 +240,7 @@ impl BTreeStorage {
             // Master page was already allocated so verify the layout.
             let master = inner
                 .read(Self::MASTER)
+                .unwrap()
                 .expect("the master page should always be allocated");
 
             MasterPage::from_bytes(&master)
@@ -250,6 +253,8 @@ impl BTreeStorage {
     fn write_root(&mut self, root: u64) {
         self.master.root = root;
         self.master.commit(&mut *self.inner);
+        // TODO: Return some wrapped error to the user of the btree
+        self.inner.sync().unwrap();
     }
 
     /// Read the root node into an in-memory [`bnode::Node`].
@@ -257,6 +262,7 @@ impl BTreeStorage {
         Node::from_bytes(
             self.inner
                 .read(self.master.root)
+                .unwrap()
                 .expect("the root pointer should always be valid"),
         )
     }
@@ -282,17 +288,16 @@ impl BTreeStorage {
     fn allocate(&mut self, data: PageBuffer) -> u64 {
         let ptr = self.master.freelist.pop(&mut *self.inner);
         if ptr != 0 {
-            self.write(ptr, data)
-                .expect("freelist pointers should always be allocated");
+            self.write(ptr, data);
             ptr
         } else {
-            self.inner.allocate(data.buf)
+            self.inner.allocate(data.buf).unwrap()
         }
     }
 
     /// Read the bytes stored at `ptr`.
     fn read(&self, ptr: u64) -> Option<Vec<u8>> {
-        self.inner.read(ptr)
+        self.inner.read(ptr).unwrap()
     }
 
     /// Write data to the page at `ptr`.
@@ -301,8 +306,8 @@ impl BTreeStorage {
     ///
     /// If the page being written has not been allocated a [`PageNotAllocatedError`]
     /// is returned.
-    fn write(&mut self, ptr: u64, data: PageBuffer) -> Result<(), PageNotAllocatedError> {
-        self.inner.write(ptr, data.buf)
+    fn write(&mut self, ptr: u64, data: PageBuffer) {
+        self.inner.write(ptr, data.buf).unwrap()
     }
 }
 
@@ -357,14 +362,12 @@ impl MasterPage {
     /// After committing the in-memory representation of the `MasterPage`
     /// will be ready to accept new memory operations.
     fn commit(&mut self, storage: &mut dyn PageStorage) {
-        self.num_pages = storage.allocated() as u64;
+        self.num_pages = storage.allocated();
         self.freelist.set_max_seq();
 
         let bytes = self.to_bytes();
 
-        storage
-            .write(BTreeStorage::MASTER, &bytes)
-            .expect("the master page should always be allocated");
+        storage.write(BTreeStorage::MASTER, &bytes).unwrap();
     }
 
     /// Convert the in-memory master page to bytes that can be persisted.
@@ -490,6 +493,7 @@ impl FreeList {
         let node = freelist::Node::from_bytes(
             storage
                 .read(self.head)
+                .unwrap()
                 .expect("freelist pointers should always be valid"),
         );
         let index = freelist::seq_to_index(self.head_seq);
@@ -512,6 +516,7 @@ impl FreeList {
         let mut node = freelist::Node::from_bytes(
             storage
                 .read(self.tail)
+                .unwrap()
                 .expect("freelist pointers should always be valid"),
         );
 
@@ -524,7 +529,7 @@ impl FreeList {
             // grow each time the tail is full.
             let mut next = self.pop(storage);
             if next == 0 {
-                next = storage.allocate(&[]);
+                next = storage.allocate(&[]).unwrap();
             }
             node.set_next(next);
 
@@ -538,9 +543,7 @@ impl FreeList {
         //
         // Writes to the freelist should probably be cached until all but the master page
         // has been written to minimize the window where the freelist contains active pointers.
-        storage
-            .write(self.tail, &node.data)
-            .expect("the tail pointer should always be allocated");
+        storage.write(self.tail, &node.data).unwrap();
 
         self.tail = next_tail_ptr;
         self.tail_seq += 1;
@@ -1564,7 +1567,7 @@ mod tests {
             assert_eq!(tree.delete(key).unwrap(), value.buf);
             assert_eq!(
                 tree.storage.master.num_pages,
-                tree.storage.inner.allocated() as u64
+                tree.storage.inner.allocated()
             );
         }
 
@@ -1577,7 +1580,7 @@ mod tests {
             assert_eq!(tree.delete(key).unwrap(), value.buf);
             assert_eq!(
                 tree.storage.master.num_pages,
-                tree.storage.inner.allocated() as u64
+                tree.storage.inner.allocated()
             );
         }
 
