@@ -317,9 +317,9 @@ impl BTreeStorage {
         Self::new(Box::new(Memory::new())).unwrap()
     }
 
-    /// Create an empty in-memory storage.
+    /// Create a new on disk storage.
     ///
-    /// The storage will store the [`BTree`] in main memory.
+    /// The storage will store the [`BTree`] on disk.
     ///
     /// # Errors
     ///

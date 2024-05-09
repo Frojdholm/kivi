@@ -123,8 +123,8 @@ impl Disk {
     ///
     /// # Errors
     ///
-    /// If the file does not exist or if the file size is not a multiple
-    /// of the page size this function returns an error.
+    /// If there is an issue accessing the file system this function returns an
+    /// error.
     pub fn from_path(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
