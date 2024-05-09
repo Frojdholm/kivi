@@ -1,4 +1,4 @@
-use kivi::btree::{BTree, Key, Value};
+use kivi::btree::BTree;
 
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
@@ -11,29 +11,18 @@ fn insert_kv(tree: &mut BTree, reference: &mut HashMap<u64, u64>, rng: &mut Pcg3
 
     reference.insert(key, value);
 
-    let keybuf = key.to_le_bytes();
-    let valuebuf = value.to_le_bytes();
-
-    let key = Key::new(&keybuf).unwrap();
-    let value = Value::new(&valuebuf).unwrap();
-
-    tree.insert(key, value).unwrap();
+    tree.insert(&key.to_le_bytes(), &value.to_le_bytes()).unwrap();
 }
 
 fn delete_kv(tree: &mut BTree, reference: &mut HashMap<u64, u64>, rng: &mut Pcg32) {
     let key = **reference.keys().collect::<Vec<&u64>>().choose(rng).unwrap();
     reference.remove(&key);
-
-    let keybuf = key.to_le_bytes();
-    let key = Key::new(&keybuf).unwrap();
-    tree.delete(key).unwrap();
+    tree.delete(&key.to_le_bytes()).unwrap();
 }
 
 fn check_consistency(tree: &BTree, reference: &HashMap<u64, u64>) {
     for (key, ref_val) in reference.iter() {
-        let keybuf = key.to_le_bytes();
-        let key = Key::new(&keybuf).unwrap();
-        let value = tree.get(key).ok().flatten().unwrap();
+        let value = tree.get(&key.to_le_bytes()).ok().flatten().unwrap();
         let value = u64::from_le_bytes(value.try_into().unwrap());
 
         assert_eq!(value, *ref_val);

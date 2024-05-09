@@ -23,17 +23,11 @@ pub const MAX_VAL_SIZE: usize = 3000;
 /// The empty key is not allowed since it's used as a sentinel value, making
 /// the key-space in the tree complete.
 #[derive(Debug)]
-pub struct InvalidKeyError {
-    /// The size of the invalid key
-    pub size: usize,
-}
+pub struct InvalidKeyError;
 
 /// Error returned when trying to create a [`Value`] larger than [`MAX_VAL_SIZE`].
 #[derive(Debug)]
-pub struct ValueTooLargeError {
-    /// The size of the invalid value.
-    pub size: usize,
-}
+pub struct ValueTooLargeError;
 
 type Ptr = u64;
 
@@ -52,10 +46,38 @@ impl<'a> Key<'a> {
     /// key (`b""`). See [`InvalidKeyError`] for more information.
     pub fn new(buf: &'a [u8]) -> Result<Self, InvalidKeyError> {
         if buf.is_empty() || buf.len() > MAX_KEY_SIZE {
-            Err(InvalidKeyError { size: buf.len() })
+            Err(InvalidKeyError)
         } else {
             Ok(Self { buf })
         }
+    }
+}
+
+impl<'a> TryFrom<&'a str> for Key<'a> {
+    type Error = InvalidKeyError;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        Self::new(value.as_bytes())
+    }
+}
+
+impl<'a> TryFrom<&'a [u8]> for Key<'a> {
+    type Error = InvalidKeyError;
+
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'a, const SIZE: usize> From<&'a [u8; SIZE]> for Key<'a> {
+    /// Convert from an array to a `Key`
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the buffer is not a valid `Key`.
+    fn from(value: &'a [u8; SIZE]) -> Self {
+        // TODO: Have compile time checks on `SIZE`.
+        Self::new(value).unwrap()
     }
 }
 
@@ -73,10 +95,38 @@ impl<'a> Value<'a> {
     /// The key is invalid if it's larger than [`MAX_VAL_SIZE`].
     pub fn new(buf: &'a [u8]) -> Result<Self, ValueTooLargeError> {
         if buf.len() > MAX_VAL_SIZE {
-            Err(ValueTooLargeError { size: buf.len() })
+            Err(ValueTooLargeError)
         } else {
             Ok(Self { buf })
         }
+    }
+}
+
+impl<'a> TryFrom<&'a str> for Value<'a> {
+    type Error = ValueTooLargeError;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        Self::new(value.as_bytes())
+    }
+}
+
+impl<'a> TryFrom<&'a [u8]> for Value<'a> {
+    type Error = ValueTooLargeError;
+
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'a, const SIZE: usize> From<&'a [u8; SIZE]> for Value<'a> {
+    /// Convert from an array to a `Value`
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the array does not fit inside a `Value`.
+    fn from(value: &'a [u8; SIZE]) -> Self {
+        // TODO: Have compile time checks on `SIZE`.
+        Self::new(value).unwrap()
     }
 }
 
@@ -160,10 +210,18 @@ impl BTree {
     /// # Returns
     ///
     /// The old value if the key-value was updated.
-    pub fn insert(&mut self, key: Key, value: Value) -> Result<Option<Vec<u8>>, Error> {
+    pub fn insert<'a, 'b, K, V>(&mut self, key: K, value: V) -> Result<Option<Vec<u8>>, Error>
+    where
+        K: Into<Key<'a>>,
+        V: Into<Value<'b>>,
+    {
+        self._insert(key.into().buf, value.into().buf)
+    }
+
+    fn _insert(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let old_root_ptr = self.storage.read_root_ptr();
         let root = self.storage.read_root()?;
-        let (root, old_val) = root.insert(key.buf, value.buf, &mut self.storage)?;
+        let (root, old_val) = root.insert(key, value, &mut self.storage)?;
 
         let nodes = root.split();
 
@@ -199,11 +257,18 @@ impl BTree {
     /// # Panics
     ///
     /// The function can panic in case the internal state of the tree is invalid.
-    pub fn delete(&mut self, key: Key) -> Result<Vec<u8>, Error> {
+    pub fn delete<'a, K>(&mut self, key: K) -> Result<Vec<u8>, Error>
+    where
+        K: Into<Key<'a>>,
+    {
+        self._delete(key.into().buf)
+    }
+
+    fn _delete(&mut self, key: &[u8]) -> Result<Vec<u8>, Error> {
         let old_root_ptr = self.storage.read_root_ptr();
         let root = self.storage.read_root()?;
 
-        let (root, val) = root.delete(key.buf, &mut self.storage)?;
+        let (root, val) = root.delete(key, &mut self.storage)?;
         self.storage.deallocate(old_root_ptr)?;
         // Deleting nodes should make the root smaller so the buffer should always fit
         let root_ptr = self.storage.allocate(root.as_buffer().unwrap())?;
@@ -216,9 +281,16 @@ impl BTree {
     /// # Errors
     ///
     /// This function returns an error if there are issues accessing the tree.
-    pub fn get(&self, key: Key) -> Result<Option<Vec<u8>>, Error> {
+    pub fn get<'a, K>(&self, key: K) -> Result<Option<Vec<u8>>, Error>
+    where
+        K: Into<Key<'a>>,
+    {
+        self._get(key.into().buf)
+    }
+
+    fn _get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let root = self.storage.read_root()?;
-        root.find_key(key.buf, &self.storage)
+        root.find_key(key, &self.storage)
     }
 }
 
@@ -1485,51 +1557,45 @@ mod tests {
 
     #[test]
     fn test_insert_and_update_single_key_in_tree() {
-        let key = Key::new(b"key").unwrap();
-        let non_existent = Key::new(b"non-existent").unwrap();
-        let value = Value::new(b"value").unwrap();
-        let eulav = Value::new(b"eulav").unwrap();
+        let key = b"key";
+        let non_existent = b"non-existent";
+        let value = b"value";
+        let eulav = b"eulav";
         let mut tree = BTree::in_memory();
 
         assert!(tree.get(non_existent).unwrap().is_none());
         assert!(tree.insert(key, value).unwrap().is_none());
-        assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
+        assert_eq!(tree.get(key).ok().flatten().unwrap(), value);
         assert!(tree.get(non_existent).unwrap().is_none());
 
-        assert_eq!(tree.insert(key, eulav).unwrap(), Some(value.buf.into()));
-        assert_eq!(tree.get(key).ok().flatten().unwrap(), eulav.buf);
+        assert_eq!(tree.insert(key, eulav).ok().flatten().unwrap(), value);
+        assert_eq!(tree.get(key).ok().flatten().unwrap(), eulav);
         assert!(tree.get(non_existent).unwrap().is_none());
     }
 
     #[test]
     fn test_empty_key_is_invalid() {
-        assert!(Key::new(b"").is_err());
+        assert!(Key::new(&[]).is_err());
     }
 
     #[test]
     fn test_insert_many_in_tree() {
         let mut tree = BTree::in_memory();
-        let non_existent = Key::new(b"non-existent").unwrap();
-        let value = Value::new(&[0_u8; 100]).unwrap();
+        let non_existent = b"non-existent";
+        let value = &[0_u8; 100];
 
         // Insert multiple pages of data to ensure the tree can handle splits
         for i in 0_u64..100_u64 {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).unwrap().is_none());
+            assert!(tree.insert(&i.to_le_bytes(), value).unwrap().is_none());
         }
         for i in (100_u64..200_u64).rev() {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).unwrap().is_none());
+            assert!(tree.insert(&i.to_le_bytes(), value).unwrap().is_none());
         }
 
         assert!(tree.get(non_existent).unwrap().is_none());
 
         for i in 0_u64..200_u64 {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
+            assert_eq!(tree.get(&i.to_le_bytes()).ok().flatten().unwrap(), value);
         }
 
         // Check that the storage can be loaded correctly into a new BTree
@@ -1538,31 +1604,32 @@ mod tests {
         };
         assert!(tree_clone.get(non_existent).unwrap().is_none());
         for i in 0_u64..200_u64 {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert_eq!(tree_clone.get(key).ok().flatten().unwrap(), value.buf);
+            assert_eq!(
+                tree_clone.get(&i.to_le_bytes()).ok().flatten().unwrap(),
+                value
+            );
         }
     }
 
     #[test]
     fn test_insert_and_delete_single_key_in_tree() {
-        let key = Key::new(b"key").unwrap();
-        let non_existent = Key::new(b"non-existent").unwrap();
-        let value = Value::new(b"value").unwrap();
+        let key = b"key";
+        let non_existent = b"non-existent";
+        let value = b"value";
         let mut tree = BTree::in_memory();
 
         assert!(matches!(tree.delete(key).unwrap_err(), Error::KeyNotFound));
 
         assert!(tree.get(non_existent).unwrap().is_none());
         assert!(tree.insert(key, value).unwrap().is_none());
-        assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
+        assert_eq!(tree.get(key).ok().flatten().unwrap(), value);
         assert!(tree.get(non_existent).unwrap().is_none());
         assert!(matches!(
             tree.delete(non_existent).unwrap_err(),
             Error::KeyNotFound
         ));
 
-        assert_eq!(tree.delete(key).unwrap(), value.buf);
+        assert_eq!(tree.delete(key).unwrap(), value);
         assert!(tree.get(key).unwrap().is_none());
         assert!(tree.get(non_existent).unwrap().is_none());
     }
@@ -1570,43 +1637,38 @@ mod tests {
     #[test]
     fn test_insert_and_delete_many_in_tree() {
         let mut tree = BTree::in_memory();
-        let non_existent = Key::new(b"non-existent").unwrap();
-        let value = Value::new(&[0_u8; 100]).unwrap();
+        let non_existent = b"non-existent";
+        let value = &[0_u8; 100];
 
         // Insert multiple pages of data to ensure the tree can handle splits
         for i in 0_u64..100_u64 {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).unwrap().is_none());
+            assert!(tree.insert(&i.to_le_bytes(), value).unwrap().is_none());
         }
         for i in (100_u64..200_u64).rev() {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert!(tree.insert(key, value).unwrap().is_none());
+            assert!(tree.insert(&i.to_le_bytes(), value).unwrap().is_none());
         }
 
         assert!(tree.get(non_existent).unwrap().is_none());
 
         for i in 0_u64..200_u64 {
-            let buf = i.to_le_bytes();
-            let key = Key::new(&buf).unwrap();
-            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
-            assert_eq!(tree.delete(key).unwrap(), value.buf);
-            assert!(tree.get(key).unwrap().is_none());
+            let key = i.to_le_bytes();
+            assert_eq!(tree.get(&key).ok().flatten().unwrap(), value);
+            assert_eq!(tree.delete(&key).unwrap(), value);
+            assert!(tree.get(&key).unwrap().is_none());
         }
     }
 
     #[test]
     fn test_storage_reuse_is_working() {
-        let key = Key::new(b"key").unwrap();
-        let value = Value::new(b"value").unwrap();
+        let key = b"key";
+        let value = b"value";
         let mut tree = BTree::in_memory();
 
         for _ in 0..10000 {
             tree.insert(key, value).unwrap();
             //assert!(tree.get(key).is_none());
-            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
-            assert_eq!(tree.delete(key).unwrap(), value.buf);
+            assert_eq!(tree.get(key).ok().flatten().unwrap(), value);
+            assert_eq!(tree.delete(key).unwrap(), value);
             assert_eq!(
                 tree.storage.master.num_pages,
                 tree.storage.inner.allocated()
@@ -1618,8 +1680,8 @@ mod tests {
         for _ in 0..10000 {
             tree.insert(key, value).unwrap();
             //assert!(tree.get(key).is_none());
-            assert_eq!(tree.get(key).ok().flatten().unwrap(), value.buf);
-            assert_eq!(tree.delete(key).unwrap(), value.buf);
+            assert_eq!(tree.get(key).ok().flatten().unwrap(), value);
+            assert_eq!(tree.delete(key).unwrap(), value);
             assert_eq!(
                 tree.storage.master.num_pages,
                 tree.storage.inner.allocated()
